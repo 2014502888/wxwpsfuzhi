@@ -68,6 +68,7 @@ static WKWebView *FindWebViewInView(UIView *view, NSInteger depth) {
             IMP newFinish = imp_implementationWithBlock(^(id self, WKWebView *wv, id nav) {
                 ((void(*)(id, SEL, id, id))origFinish)(self, selFinish, wv, nav);
                 [JSBridge injectInto:wv];
+                [JSBridge ensureInjected:wv]; // 补挂 handler + 当前页立即注入点击脚本
                 // xlsx 预览页：注入列标行/行号列 + 抬头下方列统计条
                 NSString *u = wv.URL.absoluteString.lowercaseString ?: @"";
                 if ([u containsString:@"xlsx"] || [u containsString:@"sheet"]) {

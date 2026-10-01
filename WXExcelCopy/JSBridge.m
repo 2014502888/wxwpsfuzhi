@@ -82,6 +82,20 @@ static NSString *const kInjectScript =
     }
 }
 
+#pragma mark - 补注入（didFinishNavigation 时调用，防 WKUserScript 时序/controller 被替换）
+
++ (void)ensureInjected:(WKWebView *)webView {
+    if (!webView) return;
+    // 1) 补挂消息 handler（若 userContentController 被微信替换，原 handler 会丢）
+    if (!objc_getAssociatedObject(webView, kBridgeObjKey)) {
+        JSBridge *bridge = [[JSBridge alloc] init];
+        [webView.configuration.userContentController addScriptMessageHandler:bridge name:kBridgeName];
+        objc_setAssociatedObject(webView, kBridgeObjKey, bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    // 2) 直接在当前 document 运行点击注入脚本（WKUserScript 只在导航前注入，此时补一次立即生效）
+    [webView evaluateJavaScript:kInjectScript completionHandler:nil];
+}
+
 #pragma mark - 注入列标行（A/B/C）+ 行号列（表头=1），类似 WPS 表格
 
 + (void)injectRowColHeaderInto:(WKWebView *)webView {
