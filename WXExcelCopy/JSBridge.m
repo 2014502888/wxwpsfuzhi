@@ -22,7 +22,7 @@ static NSString *const kInjectScript =
 "    if(el.nodeType===3) el=el.parentElement; if(!el)return;"
 "    // 统计条列项：点 A 列 N 行 → 复制该列整列"
 "    var cs=el.closest?el.closest('[data-col]'):null;"
-"    if(cs){ var c=parseInt(cs.getAttribute('data-col'),10); if(!isNaN(c)&&c>0){ post({type:'col',col:c,url:location.href}); return; } }"
+"    if(cs){ var c=parseInt(cs.getAttribute('data-col'),10); if(!isNaN(c)&&c>0){ post({type:'col',col:c}); return; } }"
 "    var info=null;"
 "    var td=el.closest?el.closest('td,th'):null;"
 "    if(td&&td.parentElement){"
@@ -37,7 +37,7 @@ static NSString *const kInjectScript =
 "      if(g){ var r=parseInt(g.getAttribute('data-row'),10), c2=parseInt(g.getAttribute('data-col'),10);"
 "        if(!isNaN(r)&&!isNaN(c2)&&r>0&&c2>0) info={row:r,col:c2,mode:'grid'}; }"
 "    }"
-"    if(info) post({type:'cell',row:info.row,col:info.col,mode:info.mode,url:location.href});"
+"    if(info) post({type:'cell',row:info.row,col:info.col,mode:info.mode});"
 "  },true);"
 "})();";
 
@@ -69,10 +69,16 @@ static NSString *const kInjectScript =
     if (![message.name isEqualToString:kBridgeName]) return;
     if (![message.body isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *body = message.body;
-    if ([body[@"type"] isEqualToString:@"cell"]) {
-        [self handleCell:body];
-    } else if ([body[@"type"] isEqualToString:@"col"]) {
-        [self handleCol:body];
+    // 当前预览页 URL 优先从 frameInfo 取（比 JS location.href 可靠），用于文件匹配
+    NSString *pageURL = message.frameInfo.request.URL.absoluteString ?: @"";
+    if (pageURL.length == 0) pageURL = message.webView.URL.absoluteString ?: @"";
+    if (pageURL.length == 0) return;
+    NSMutableDictionary *body2 = [body mutableCopy];
+    body2[@"url"] = pageURL;
+    if ([body2[@"type"] isEqualToString:@"cell"]) {
+        [self handleCell:body2];
+    } else if ([body2[@"type"] isEqualToString:@"col"]) {
+        [self handleCol:body2];
     }
 }
 
@@ -89,8 +95,8 @@ static NSString *const kInjectScript =
     "  var rows=t.rows;"
     "  var colW=[]; var f=rows[0];"
     "  for(var i=0;i<f.cells.length;i++){ colW.push(f.cells[i].getBoundingClientRect().width); }"
-    "  var cellStyle='padding:2px 8px;text-align:center;font-size:11px;color:#999;background:#f2f2f2;"
-    "border-right:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;white-space:nowrap;';"
+    "  var cellStyle='padding:1px 2px;text-align:center;font-size:10px;color:#999;background:#f2f2f2;"
+    "border-right:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;white-space:nowrap;width:22px;';"
     "  for(var r=0;r<rows.length;r++){"
     "    var td=document.createElement('td');"
     "    td.textContent=String(r+1);"
@@ -101,7 +107,7 @@ static NSString *const kInjectScript =
     "  var hr=document.createElement('tr');"
     "  var hd=document.createElement('td');"
     "  hd.textContent='';"
-    "  hd.style.cssText='padding:2px 8px;background:#f2f2f2;border-right:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;';"
+    "  hd.style.cssText='padding:1px 2px;width:22px;background:#f2f2f2;border-right:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;';"
     "  hr.appendChild(hd);"
     "  var headStyle='padding:3px 8px;text-align:center;font-size:11px;font-weight:600;color:#666;"
     "background:#f2f2f2;border-right:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;white-space:nowrap;';"
