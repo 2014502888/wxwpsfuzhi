@@ -43,13 +43,25 @@ static NSString *const kInjectScript =
 
 @implementation JSBridge
 
+// 挂接消息 handler：以 userContentController 为粒度防重复（同名重复注册会崩溃；
+// controller 被微信替换时新 controller 无标记，会重新挂上）
++ (void)attachBridgeToWebView:(WKWebView *)webView {
+    if (!webView) return;
+    WKUserContentController *ctrl = webView.configuration.userContentController;
+    if (!ctrl) return;
+    if (!objc_getAssociatedObject(ctrl, kBridgeObjKey)) {
+        JSBridge *bridge = [[JSBridge alloc] init];
+        [ctrl addScriptMessageHandler:bridge name:kBridgeName];
+        objc_setAssociatedObject(ctrl, kBridgeObjKey, bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
 + (void)injectInto:(WKWebView *)webView {
     if (!webView) return;
     NSNumber *flag = objc_getAssociatedObject(webView, kInjectedKey);
     if (flag && flag.boolValue) return;
 
-    JSBridge *bridge = [[JSBridge alloc] init];
-    [webView.configuration.userContentController addScriptMessageHandler:bridge name:kBridgeName];
+    [self attachBridgeToWebView:webView];
 
     WKUserScript *script = [[WKUserScript alloc]
         initWithSource:kInjectScript
@@ -58,8 +70,6 @@ static NSString *const kInjectScript =
     [webView.configuration.userContentController addUserScript:script];
 
     objc_setAssociatedObject(webView, kInjectedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    // bridge 生命周期挂在 webView 上（bridge 不持有 webView，无循环引用）
-    objc_setAssociatedObject(webView, kBridgeObjKey, bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 #pragma mark - WKScriptMessageHandler
@@ -86,12 +96,8 @@ static NSString *const kInjectScript =
 
 + (void)ensureInjected:(WKWebView *)webView {
     if (!webView) return;
-    // 无条件补挂消息 handler：微信可能替换 userContentController/重建 webView，
-    // 旧 handler 失效时 postMessage 会静默失败（JS try/catch 吞掉，表现为点击无反应）。
-    // addScriptMessageHandler 同名会替换旧 handler，安全。
-    JSBridge *bridge = [[JSBridge alloc] init];
-    [webView.configuration.userContentController addScriptMessageHandler:bridge name:kBridgeName];
-    objc_setAssociatedObject(webView, kBridgeObjKey, bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // 补挂消息 handler：controller 粒度防重复（微信替换 controller 时新 controller 会重新挂上）
+    [self attachBridgeToWebView:webView];
     // 直接在当前 document 运行点击注入脚本（WKUserScript 只在导航前注入，此时补一次立即生效）
     [webView evaluateJavaScript:kInjectScript completionHandler:nil];
 }
