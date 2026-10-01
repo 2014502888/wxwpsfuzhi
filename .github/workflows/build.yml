@@ -1,0 +1,39 @@
+name: Build dylib
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile arm64 dylib
+        run: |
+          mkdir -p out
+          xcrun -sdk iphoneos clang \
+            -arch arm64 \
+            -mios-version-min=15.0 \
+            -fobjc-arc \
+            -Wno-deprecated-declarations \
+            -framework Foundation \
+            -framework UIKit \
+            -framework WebKit \
+            -framework CoreGraphics \
+            -lz \
+            WXExcelCopy/Tweak.m \
+            WXExcelCopy/JSBridge.m \
+            WXExcelCopy/XLSXParser.m \
+            WXExcelCopy/Toast.m \
+            -dynamiclib \
+            -o out/WXExcelCopy.dylib
+          ls -la out/
+          file out/WXExcelCopy.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wxexcelcopy-dylib
+          path: out/WXExcelCopy.dylib
