@@ -19,6 +19,7 @@ static NSString *const kInjectScript =
 "  function post(o){ try{ window.webkit.messageHandlers.wxExcelCopy.postMessage(o); }catch(e){} }"
 "  document.addEventListener('click',function(e){"
 "    var el=e.target||e.srcElement; if(!el)return;"
+"    if(el.nodeType===3) el=el.parentElement; if(!el)return;"
 "    // 统计条列项：点 A 列 N 行 → 复制该列整列"
 "    var cs=el.closest?el.closest('[data-col]'):null;"
 "    if(cs){ var c=parseInt(cs.getAttribute('data-col'),10); if(!isNaN(c)&&c>0){ post({type:'col',col:c,url:location.href}); return; } }"
