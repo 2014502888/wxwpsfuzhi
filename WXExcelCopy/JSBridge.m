@@ -86,13 +86,13 @@ static NSString *const kInjectScript =
 
 + (void)ensureInjected:(WKWebView *)webView {
     if (!webView) return;
-    // 1) 补挂消息 handler（若 userContentController 被微信替换，原 handler 会丢）
-    if (!objc_getAssociatedObject(webView, kBridgeObjKey)) {
-        JSBridge *bridge = [[JSBridge alloc] init];
-        [webView.configuration.userContentController addScriptMessageHandler:bridge name:kBridgeName];
-        objc_setAssociatedObject(webView, kBridgeObjKey, bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    // 2) 直接在当前 document 运行点击注入脚本（WKUserScript 只在导航前注入，此时补一次立即生效）
+    // 无条件补挂消息 handler：微信可能替换 userContentController/重建 webView，
+    // 旧 handler 失效时 postMessage 会静默失败（JS try/catch 吞掉，表现为点击无反应）。
+    // addScriptMessageHandler 同名会替换旧 handler，安全。
+    JSBridge *bridge = [[JSBridge alloc] init];
+    [webView.configuration.userContentController addScriptMessageHandler:bridge name:kBridgeName];
+    objc_setAssociatedObject(webView, kBridgeObjKey, bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // 直接在当前 document 运行点击注入脚本（WKUserScript 只在导航前注入，此时补一次立即生效）
     [webView evaluateJavaScript:kInjectScript completionHandler:nil];
 }
 
