@@ -1,5 +1,5 @@
-// WebViewProbe.m — 通用 WKWebView 加载探测：任何 WebView 加载都注入 JS，
-// 命中 xlsx/spreadsheet/preview/file 关键词才弹窗（不依赖微信具体控制器类名）
+// WebViewProbe.m — 通用 WKWebView 加载探测：任何 WebView 加载都注入 JS
+// （不依赖微信具体控制器类名；不再弹任何探测窗）
 
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
@@ -9,13 +9,11 @@
 
 @implementation WebViewProbe
 
-static NSMutableSet *gSeenURLs;
 static BOOL gInstalled;
 
 + (void)install {
     if (gInstalled) return;
     gInstalled = YES;
-    gSeenURLs = [NSMutableSet set];
 
     Class wk = [WKWebView class];
 
@@ -59,35 +57,9 @@ static BOOL gInstalled;
 }
 
 + (void)onLoad:(WKWebView *)wv url:(NSURL *)url {
-    NSString *s = url.absoluteString ?: @"";
-    NSString *lower = s.lowercaseString;
-    BOOL hit = [lower containsString:@"xlsx"] ||
-               [lower containsString:@"spreadsheet"] ||
-               [lower containsString:@"sheet"] ||
-               [lower containsString:@"preview"] ||
-               [lower containsString:@"file"];
-
-    // 所有 WebView 都注入 JS（点击复制逻辑本身无害）
+    if (!wv) return;
+    // 所有 WebView 都注入 JS（点击复制逻辑本身无害，命中与否由 JS 侧单元格点击决定）
     [JSBridge injectInto:wv];
-
-    if (!hit) return;
-    if ([gSeenURLs containsObject:s]) return;
-    [gSeenURLs addObject:s];
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *top = [JSBridge topVC];
-        if (!top) return;
-        NSString *delegateCls = wv.navigationDelegate ? NSStringFromClass([wv.navigationDelegate class]) : @"nil";
-        NSString *msg = [NSString stringWithFormat:@"WebView 加载命中:\n%@\n\ndelegate: %@\nURL 已复制到剪贴板", s, delegateCls];
-        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"WXExcelCopy 探测"
-                                                                    message:msg
-                                                             preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"复制 URL" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            [UIPasteboard generalPasteboard].string = s;
-        }]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
-        [top presentViewController:ac animated:YES completion:nil];
-    });
 }
 
 @end

@@ -17,17 +17,6 @@ static NSString *const kInjectScript =
 "  if (window.__wxExcelCopyInjected) return;"
 "  window.__wxExcelCopyInjected = true;"
 "  function post(o){ try{ window.webkit.messageHandlers.wxExcelCopy.postMessage(o); }catch(e){} }"
-"  function dump(){"
-"    var tables=document.querySelectorAll('table').length;"
-"    var tds=document.querySelectorAll('td,th').length;"
-"    var grids=document.querySelectorAll('[data-row],[data-col]').length;"
-"    var canvases=document.querySelectorAll('canvas').length;"
-"    var sample='';"
-"    var td0=document.querySelector('td,th');"
-"    if(td0){ sample=(td0.innerText||td0.textContent||'').slice(0,40); }"
-"    post({type:'dump',url:location.href,tables:tables,tds:tds,grids:grids,canvases:canvases,sample:sample,title:document.title||'',cls:(document.body?document.body.className||'':'')});"
-"  }"
-"  setTimeout(dump,600);"
 "  document.addEventListener('click',function(e){"
 "    var el=e.target||e.srcElement; if(!el)return; var info=null;"
 "    var td=el.closest?el.closest('td,th'):null;"
@@ -73,82 +62,9 @@ static NSString *const kInjectScript =
     if (![message.name isEqualToString:kBridgeName]) return;
     if (![message.body isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *body = message.body;
-    NSString *type = body[@"type"];
-    if ([type isEqualToString:@"dump"]) {
-        [self handleDump:body];
-    } else if ([type isEqualToString:@"cell"]) {
+    if ([body[@"type"] isEqualToString:@"cell"]) {
         [self handleCell:body];
     }
-}
-
-#pragma mark - dump 诊断（弹窗展示 + 复制，沙盒文件普通方式看不到）
-
-+ (UIViewController *)topVC {
-    UIWindow *keyWindow = nil;
-    for (UIWindow *w in [UIApplication sharedApplication].windows) {
-        if (w.isKeyWindow) { keyWindow = w; break; }
-    }
-    if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
-    UIViewController *vc = keyWindow.rootViewController;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
-    return vc;
-}
-
-- (UIViewController *)topViewController {
-    return [JSBridge topVC];
-}
-
-- (BOOL)isHitURL:(NSString *)url {
-    NSString *lower = url.lowercaseString;
-    return [lower containsString:@"xlsx"] ||
-           [lower containsString:@"spreadsheet"] ||
-           [lower containsString:@"sheet"] ||
-           [lower containsString:@"preview"] ||
-           [lower containsString:@"file"];
-}
-
-- (void)handleDump:(NSDictionary *)body {
-    NSString *diag = [NSString stringWithFormat:
-        @"URL: %@\ntables: %@  tds: %@  grids: %@  canvases: %@\ntitle: %@\nbodyCls: %@\nsample: %@",
-        body[@"url"] ?: @"", body[@"tables"] ?: @"0", body[@"tds"] ?: @"0",
-        body[@"grids"] ?: @"0", body[@"canvases"] ?: @"0",
-        body[@"title"] ?: @"", body[@"cls"] ?: @"", body[@"sample"] ?: @""];
-
-    // 备份到沙盒日志（有文件工具时可用）
-    NSString *logPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/wxExcelCopy_log.txt"];
-    NSString *line = [NSString stringWithFormat:@"\n[%@]\n%@\n", [NSDate date], diag];
-    @synchronized (self) {
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-        if (!fh) {
-            [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
-            fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-        }
-        if (fh) {
-            @try {
-                [fh seekToEndOfFile];
-                [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-                [fh closeFile];
-            } @catch (NSException *e) {}
-        }
-    }
-
-    // 非预览页（普通 H5）不弹窗，避免打扰
-    if (![self isHitURL:body[@"url"] ?: @""]) return;
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *top = [self topViewController];
-        if (!top) return;
-        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"WXExcelCopy 诊断"
-                                                                    message:diag
-                                                             preferredStyle:UIAlertControllerStyleAlert];
-        [ac addAction:[UIAlertAction actionWithTitle:@"复制诊断信息"
-                                               style:UIAlertActionStyleDefault
-                                             handler:^(UIAlertAction *a) {
-            [UIPasteboard generalPasteboard].string = diag;
-        }]];
-        [ac addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
-        [top presentViewController:ac animated:YES completion:nil];
-    });
 }
 
 #pragma mark - 点击单元格 → 复制本列往下
@@ -161,18 +77,17 @@ static NSString *const kInjectScript =
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         // 收集全沙盒 xlsx（最新在前），逐个尝试解析，第一个成功的用
         NSArray<NSString *> *candidates = [self allXlsxSortedByTime];
-        NSString *usedPath = nil;
         NSArray<NSString *> *lines = nil;
         NSError *lastErr = nil;
         for (NSString *p in candidates) {
             NSError *e = nil;
             NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:row error:&e];
-            if (l && !e) { usedPath = p; lines = l; break; }
+            if (l && !e) { lines = l; break; }
             lastErr = e;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!lines || lastErr) {
-                [self showParseError:lastErr path:usedPath ?: @"(无可用文件)" candidates:candidates];
+                [Toast show:@"未找到可用文件"];
                 return;
             }
             if (lines.count == 0) {
@@ -183,111 +98,10 @@ static NSString *const kInjectScript =
             [UIPasteboard generalPasteboard].string = joined;
             NSString *letter = [XLSXParser columnLetter:col];
             NSInteger lastRow = row + (NSInteger)lines.count - 1;
-            [Toast show:[NSString stringWithFormat:@"已复制 %@%ld:%@%lu · %lu 行",
-                         letter, (long)row, letter, (unsigned long)lastRow, (unsigned long)lines.count]];
+            [Toast show:[NSString stringWithFormat:@"复制%@%ld-%@%ld共%lu条",
+                         letter, (long)row, letter, (long)lastRow, (unsigned long)lines.count]];
         });
     });
-}
-
-// 从 file:// URL 提取 xlsx 路径
-- (NSString *)xlsxPathFromURL:(NSString *)url {
-    if (!url.length) return nil;
-    NSString *p = url;
-    if ([p hasPrefix:@"file://"]) p = [p substringFromIndex:7];
-    p = [p stringByRemovingPercentEncoding];
-    if (![p.pathExtension.lowercaseString isEqualToString:@"xlsx"]) return nil;
-    if ([[NSFileManager defaultManager] fileExistsAtPath:p]) return p;
-    return nil;
-}
-
-// zip 条目列表（诊断用）
-- (NSString *)zipEntryList:(NSString *)path {
-    NSArray *entries = [XLSXParser zipEntriesAtPath:path error:nil];
-    if (!entries) return @"(无法读取)";
-    if (entries.count == 0) return @"(空 zip 或无条目)";
-    NSArray *head = entries.count > 25 ? [entries subarrayWithRange:NSMakeRange(0, 25)] : entries;
-    NSString *list = [head componentsJoinedByString:@"\n"];
-    if (entries.count > 25) list = [list stringByAppendingFormat:@"\n... 共 %lu 条", (unsigned long)entries.count];
-    return list;
-}
-
-- (NSString *)hexDump:(NSData *)d {
-    if (!d || d.length == 0) return @"(空)";
-    NSMutableString *s = [NSMutableString string];
-    const uint8_t *b = d.bytes;
-    NSUInteger n = MIN(d.length, 96);
-    for (NSUInteger i = 0; i < n; i++) [s appendFormat:@"%02X ", b[i]];
-    return s;
-}
-
-// 探测 EOCD：返回偏移，未找到返回 -1
-- (NSInteger)findEOCDOffset:(NSData *)data {
-    const uint8_t *bytes = data.bytes;
-    NSUInteger len = data.length;
-    if (len < 22) return -1;
-    NSUInteger scanMin = (len > 65535 + 22) ? (len - 65535 - 22) : 0;
-    for (NSUInteger i = len - 22; i >= scanMin; i--) {
-        if (bytes[i] == 0x50 && bytes[i+1] == 0x4b && bytes[i+2] == 0x05 && bytes[i+3] == 0x06) {
-            return (NSInteger)i;
-        }
-    }
-    return -1;
-}
-
-// 解析失败 → 弹详细错误（含文件魔数判断是否标准 xlsx + 全沙盒候选列表）
-- (void)showParseError:(NSError *)err path:(NSString *)path candidates:(NSArray<NSString *> *)candidates {
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
-    long long size = [attrs[NSFileSize] longLongValue];
-    NSData *fileData = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
-    NSString *magic = @"(读不到)";
-    if (fileData.length >= 4) {
-        const uint8_t *b = fileData.bytes;
-        magic = [NSString stringWithFormat:@"%02X %02X %02X %02X", b[0], b[1], b[2], b[3]];
-    } else if (fileData.length == 0) {
-        magic = @"(空文件)";
-    } else {
-        magic = [NSString stringWithFormat:@"(%lu 字节)", (unsigned long)fileData.length];
-    }
-    NSInteger eocdOff = [self findEOCDOffset:fileData];
-    NSData *head = fileData.length > 96 ? [fileData subdataWithRange:NSMakeRange(0, 96)] : fileData;
-    NSData *tail = fileData.length > 96 ? [fileData subdataWithRange:NSMakeRange(fileData.length - 96, 96)] : fileData;
-    NSMutableString *candList = [NSMutableString string];
-    if (candidates.count) {
-        for (NSUInteger i = 0; i < MIN(candidates.count, 15); i++) {
-            [candList appendFormat:@"%lu. %@\n", (unsigned long)(i + 1), candidates[i]];
-        }
-        if (candidates.count > 15) [candList appendFormat:@"... 共 %lu 个", (unsigned long)candidates.count];
-
-        // 第一个候选文件的真实结构（判断是否标准 zip / 微信是否改过）
-        NSString *first = candidates.firstObject;
-        NSData *fdata = [NSData dataWithContentsOfFile:first options:NSDataReadingMappedIfSafe error:nil];
-        if (fdata.length) {
-            NSData *fhead = fdata.length > 64 ? [fdata subdataWithRange:NSMakeRange(0, 64)] : fdata;
-            NSInteger feocd = [self findEOCDOffset:fdata];
-            NSString *ftrace = [XLSXParser zipTraceAtPath:first];
-            [candList appendFormat:@"\n---- 第 1 个文件实际结构 ----\n路径: %@\n大小: %lu B\nEOCD(js): %ld\n头 64B: %@\n条目trace:\n%@\n",
-                first, (unsigned long)fdata.length, (long)feocd,
-                [self hexDump:fhead], ftrace];
-        }
-    } else {
-        [candList appendString:@"(沙盒内未找到 xlsx)"];
-    }
-    NSString *msg = [NSString stringWithFormat:
-        @"错误: %@\n路径: %@\n大小: %lld 字节\n文件头: %@ (标准 zip 应为 50 4B 03 04)\nEOCD 偏移: %ld\n\n文件头 96B hex:\n%@\n\n文件尾 96B hex:\n%@\n\n沙盒内 xlsx 候选:\n%@",
-        err ? err.localizedDescription : @"解析返回空",
-        path, size, magic, (long)eocdOff,
-        [self hexDump:head], [self hexDump:tail],
-        candList];
-    UIViewController *top = [JSBridge topVC];
-    if (!top) return;
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"解析失败详情"
-                                                                message:msg
-                                                         preferredStyle:UIAlertControllerStyleAlert];
-    [ac addAction:[UIAlertAction actionWithTitle:@"复制" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [UIPasteboard generalPasteboard].string = msg;
-    }]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
-    [top presentViewController:ac animated:YES completion:nil];
 }
 
 #pragma mark - xlsx 扫描（轻量：只扫 fileCache/www/Documents 浅层，限量防内存爆炸）
@@ -337,12 +151,6 @@ static NSString *const kInjectScript =
     NSMutableArray *paths = [NSMutableArray array];
     for (NSDictionary *d in items) [paths addObject:d[@"path"]];
     return paths;
-}
-
-// 兼容旧调用
-- (NSString *)findLatestXlsx {
-    NSArray *all = [self allXlsxSortedByTime];
-    return all.firstObject;
 }
 
 @end

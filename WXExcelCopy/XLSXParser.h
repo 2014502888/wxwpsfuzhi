@@ -19,7 +19,4 @@
 // 列号 → 字母（1→A, 27→AA）
 + (NSString *)columnLetter:(NSInteger)col;
 
-// zip 解析逐步 trace（诊断用）：返回每一步中间值，定位解析失败原因
-+ (NSString *)zipTraceAtPath:(NSString *)path;
-
 @end

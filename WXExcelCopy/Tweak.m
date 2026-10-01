@@ -6,7 +6,6 @@
 #import <objc/runtime.h>
 #import <WebKit/WebKit.h>
 #import "JSBridge.h"
-#import "Toast.h"
 #import "WebViewProbe.h"
 
 #pragma mark - Runtime helpers
@@ -77,15 +76,6 @@ static WKWebView *FindWebViewInView(UIView *view, NSInteger depth) {
 
         // 通用 WebView 探测（不依赖具体控制器类名）
         [WebViewProbe install];
-
-        // 注入成功确认：首次启动弹一次 Toast（后续不再弹，避免打扰）
-        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        if (![ud boolForKey:@"wxExcelCopy_loaded_tip"]) {
-            [ud setBool:YES forKey:@"wxExcelCopy_loaded_tip"];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [Toast show:@"WXExcelCopy 插件已加载"];
-            });
-        }
     });
 }
 

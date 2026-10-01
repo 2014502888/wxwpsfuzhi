@@ -370,36 +370,4 @@ static NSInteger RowNumberFromRef(NSString *ref) {
     return s.length ? s : @"A";
 }
 
-+ (NSString *)zipTraceAtPath:(NSString *)path {
-    NSMutableString *t = [NSMutableString string];
-    NSData *zip = [NSData dataWithContentsOfFile:path];
-    if (!zip) return @"读文件失败";
-    const uint8_t *bytes = zip.bytes;
-    NSUInteger len = zip.length;
-    [t appendFormat:@"len=%lu\n", (unsigned long)len];
-
-    NSInteger eocd = FindEOCD(bytes, len);
-    [t appendFormat:@"eocd=%ld\n", (long)eocd];
-    if (eocd < 0) return t;
-
-    uint16_t cdEntries = R16(bytes + eocd + 10);
-    uint32_t cdSize = R32(bytes + eocd + 12);
-    uint32_t cdStart = R32(bytes + eocd + 16);
-    [t appendFormat:@"entries=%u cdSize=%u cdStart=%u\n", cdEntries, cdSize, cdStart];
-
-    uint32_t p = cdStart;
-    for (uint16_t e = 0; e < cdEntries; e++) {
-        if (p + 46 > len) { [t appendFormat:@"[%u] p+46>len p=%u len=%lu\n", e, p, (unsigned long)len]; break; }
-        uint32_t sig = R32(bytes + p);
-        if (sig != kCentralDirSig) { [t appendFormat:@"[%u] bad sig 0x%08X p=%u\n", e, sig, p]; break; }
-        uint16_t nameLen = R16(bytes + p + 28);
-        uint16_t extraLen = R16(bytes + p + 30);
-        uint16_t commentLen = R16(bytes + p + 32);
-        NSString *n = [[NSString alloc] initWithBytes:(bytes + p + 46) length:nameLen encoding:NSUTF8StringEncoding];
-        [t appendFormat:@"[%u] %@ (nl=%u ex=%u cm=%u)\n", e, n ?: @"(nil)", nameLen, extraLen, commentLen];
-        p += 46 + nameLen + extraLen + commentLen;
-    }
-    return t;
-}
-
 @end
