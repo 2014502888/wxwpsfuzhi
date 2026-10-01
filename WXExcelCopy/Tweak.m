@@ -72,7 +72,7 @@ static WKWebView *FindWebViewInView(UIView *view, NSInteger depth) {
                 NSString *u = wv.URL.absoluteString.lowercaseString ?: @"";
                 if ([u containsString:@"xlsx"] || [u containsString:@"sheet"]) {
                     [JSBridge injectRowColHeaderInto:wv];
-                    [JSBridge injectColumnStatsInto:wv];
+                    [JSBridge injectColumnStatsInto:wv url:wv.URL.absoluteString ?: @""];
                 }
             });
             method_setImplementation(mFinish, newFinish);

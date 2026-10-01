@@ -21,7 +21,7 @@ static NSString *const kInjectScript =
 "    var el=e.target||e.srcElement; if(!el)return;"
 "    // 统计条列项：点 A 列 N 行 → 复制该列整列"
 "    var cs=el.closest?el.closest('[data-col]'):null;"
-"    if(cs){ var c=parseInt(cs.getAttribute('data-col'),10); if(!isNaN(c)&&c>0){ post({type:'col',col:c}); return; } }"
+"    if(cs){ var c=parseInt(cs.getAttribute('data-col'),10); if(!isNaN(c)&&c>0){ post({type:'col',col:c,url:location.href}); return; } }"
 "    var info=null;"
 "    var td=el.closest?el.closest('td,th'):null;"
 "    if(td&&td.parentElement){"
@@ -124,10 +124,10 @@ static NSString *const kInjectScript =
     if (col < 1) return;
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSArray<NSString *> *candidates = [self allXlsxSortedByTime];
+        NSArray<NSString *> *ordered = [self orderedCandidates:body[@"url"] ?: @""];
         NSArray<NSString *> *lines = nil;
         NSError *lastErr = nil;
-        for (NSString *p in candidates) {
+        for (NSString *p in ordered) {
             NSError *e = nil;
             NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 error:&e]; // 从第 1 行（含表头）
             if (l && !e) { lines = l; break; }
@@ -153,18 +153,18 @@ static NSString *const kInjectScript =
 
 #pragma mark - 预览页抬头下方插入列统计条（页面内容一部分，不悬浮）
 
-+ (void)injectColumnStatsInto:(WKWebView *)webView {
++ (void)injectColumnStatsInto:(WKWebView *)webView url:(NSString *)url {
     if (!webView) return;
     JSBridge *bridge = [[JSBridge alloc] init];
-    [bridge doInjectColumnStatsInto:webView];
+    [bridge doInjectColumnStatsInto:webView url:url];
 }
 
-- (void)doInjectColumnStatsInto:(WKWebView *)webView {
+- (void)doInjectColumnStatsInto:(WKWebView *)webView url:(NSString *)url {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 找最新可解析 xlsx（逐个试，第一个成功即可）
-        NSArray<NSString *> *candidates = [self allXlsxSortedByTime];
+        // 匹配当前预览文件优先，其余兜底
+        NSArray<NSString *> *ordered = [self orderedCandidates:url ?: @""];
         NSDictionary *counts = nil;
-        for (NSString *p in candidates) {
+        for (NSString *p in ordered) {
             NSError *e = nil;
             NSDictionary *c = [XLSXParser columnCountsAtPath:p error:&e];
             if (c && !e) { counts = c; break; }
@@ -206,6 +206,47 @@ static NSString *const kInjectScript =
     });
 }
 
+#pragma mark - 当前预览文件匹配（www 副本整体作为前缀，匹配 fileCache 原始文件）
+
+// 微信预览副本 = 原始文件的前截断，前缀完全一致 → 用副本整体内容匹配原始文件；
+// 匹配不到返回 nil（调用方回退到最新文件）
+- (NSString *)matchXlsxForPreviewURL:(NSString *)url {
+    NSString *p = url ?: @"";
+    if ([p hasPrefix:@"file://"]) p = [p substringFromIndex:7];
+    p = [p stringByRemovingPercentEncoding];
+    if (![p.pathExtension.lowercaseString isEqualToString:@"xlsx"]) return nil;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:p]) return nil;
+
+    NSData *whole = [NSData dataWithContentsOfFile:p options:NSDataReadingMappedIfSafe error:nil];
+    if (!whole || whole.length < 1024) return nil;
+
+    NSArray<NSString *> *cands = [self allXlsxSortedByTime];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *c in cands) {
+        if ([c isEqualToString:p]) continue;
+        NSDictionary *attrs = [fm attributesOfItemAtPath:c error:nil];
+        if (!attrs) continue;
+        if ([attrs[NSFileSize] longLongValue] < (long long)whole.length) continue;
+        NSData *cHead = [NSData dataWithContentsOfFile:c options:NSDataReadingMappedIfSafe error:nil];
+        if (cHead.length >= whole.length) {
+            NSData *cPrefix = [cHead subdataWithRange:NSMakeRange(0, whole.length)];
+            if ([cPrefix isEqualToData:whole]) return c;
+        }
+    }
+    return nil;
+}
+
+// 解析候选顺序：匹配文件优先，其余按时间
+- (NSArray<NSString *> *)orderedCandidates:(NSString *)previewURL {
+    NSMutableArray *ordered = [NSMutableArray array];
+    NSString *matched = [self matchXlsxForPreviewURL:previewURL];
+    if (matched) [ordered addObject:matched];
+    for (NSString *c in [self allXlsxSortedByTime]) {
+        if (![c isEqualToString:matched]) [ordered addObject:c];
+    }
+    return ordered;
+}
+
 #pragma mark - 点击单元格 → 复制本列往下
 
 - (void)handleCell:(NSDictionary *)body {
@@ -216,11 +257,10 @@ static NSString *const kInjectScript =
 
     // 后台解析，避免卡微信主线程
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 收集全沙盒 xlsx（最新在前），逐个尝试解析，第一个成功的用
-        NSArray<NSString *> *candidates = [self allXlsxSortedByTime];
+        NSArray<NSString *> *ordered = [self orderedCandidates:body[@"url"] ?: @""];
         NSArray<NSString *> *lines = nil;
         NSError *lastErr = nil;
-        for (NSString *p in candidates) {
+        for (NSString *p in ordered) {
             NSError *e = nil;
             NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:row error:&e];
             if (l && !e) { lines = l; break; }
