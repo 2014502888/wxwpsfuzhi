@@ -83,7 +83,7 @@ static NSString *const kInjectScript =
 
 #pragma mark - dump 诊断（弹窗展示 + 复制，沙盒文件普通方式看不到）
 
-- (UIViewController *)topViewController {
++ (UIViewController *)topVC {
     UIWindow *keyWindow = nil;
     for (UIWindow *w in [UIApplication sharedApplication].windows) {
         if (w.isKeyWindow) { keyWindow = w; break; }
@@ -92,6 +92,19 @@ static NSString *const kInjectScript =
     UIViewController *vc = keyWindow.rootViewController;
     while (vc.presentedViewController) vc = vc.presentedViewController;
     return vc;
+}
+
+- (UIViewController *)topViewController {
+    return [JSBridge topVC];
+}
+
+- (BOOL)isHitURL:(NSString *)url {
+    NSString *lower = url.lowercaseString;
+    return [lower containsString:@"xlsx"] ||
+           [lower containsString:@"spreadsheet"] ||
+           [lower containsString:@"sheet"] ||
+           [lower containsString:@"preview"] ||
+           [lower containsString:@"file"];
 }
 
 - (void)handleDump:(NSDictionary *)body {
@@ -118,6 +131,9 @@ static NSString *const kInjectScript =
             } @catch (NSException *e) {}
         }
     }
+
+    // 非预览页（普通 H5）不弹窗，避免打扰
+    if (![self isHitURL:body[@"url"] ?: @""]) return;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *top = [self topViewController];

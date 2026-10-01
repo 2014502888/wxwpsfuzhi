@@ -7,6 +7,7 @@
 #import <WebKit/WebKit.h>
 #import "JSBridge.h"
 #import "Toast.h"
+#import "WebViewProbe.h"
 
 #pragma mark - Runtime helpers
 
@@ -73,6 +74,9 @@ static WKWebView *FindWebViewInView(UIView *view, NSInteger depth) {
         }
 
         NSLog(@"[WXExcelCopy] hook installed on %@", NSStringFromClass(cls));
+
+        // 通用 WebView 探测（不依赖具体控制器类名）
+        [WebViewProbe install];
 
         // 注入成功确认：首次启动弹一次 Toast（后续不再弹，避免打扰）
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];

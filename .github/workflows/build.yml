@@ -28,6 +28,7 @@ jobs:
             WXExcelCopy/JSBridge.m \
             WXExcelCopy/XLSXParser.m \
             WXExcelCopy/Toast.m \
+            WXExcelCopy/WebViewProbe.m \
             -dynamiclib \
             -o out/WXExcelCopy.dylib
           ls -la out/
