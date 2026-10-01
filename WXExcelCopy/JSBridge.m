@@ -159,29 +159,22 @@ static NSString *const kInjectScript =
 
     // 后台解析，避免卡微信主线程
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 1) 优先用预览 URL 定位文件（tmp/www 副本，可能非标准，失败继续）
-        NSString *path = [self xlsxPathFromURL:body[@"url"]];
-        NSError *err = nil;
+        // 收集全沙盒 xlsx（最新在前），逐个尝试解析，第一个成功的用
+        NSArray<NSString *> *candidates = [self allXlsxSortedByTime];
+        NSString *usedPath = nil;
         NSArray<NSString *> *lines = nil;
-        if (path) {
-            lines = [XLSXParser columnLinesAtPath:path column:col fromRow:row error:&err];
-        }
-        // 2) URL 文件失败 → 回退 tmp/fileCache 原始文件（标准 xlsx）
-        if (!lines || err) {
-            err = nil;
-            NSString *path2 = [self findLatestXlsx];
-            if (path2) {
-                lines = [XLSXParser columnLinesAtPath:path2 column:col fromRow:row error:&err];
-                path = path2;
-            }
-        }
-        if (!lines || err) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self showParseError:err path:path ?: @"(无文件)"];
-            });
-            return;
+        NSError *lastErr = nil;
+        for (NSString *p in candidates) {
+            NSError *e = nil;
+            NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:row error:&e];
+            if (l && !e) { usedPath = p; lines = l; break; }
+            lastErr = e;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (!lines || lastErr) {
+                [self showParseError:lastErr path:usedPath ?: @"(无可用文件)" candidates:candidates];
+                return;
+            }
             if (lines.count == 0) {
                 [Toast show:@"该列无数据"];
                 return;
@@ -241,8 +234,8 @@ static NSString *const kInjectScript =
     return -1;
 }
 
-// 解析失败 → 弹详细错误（含文件魔数判断是否标准 xlsx）
-- (void)showParseError:(NSError *)err path:(NSString *)path {
+// 解析失败 → 弹详细错误（含文件魔数判断是否标准 xlsx + 全沙盒候选列表）
+- (void)showParseError:(NSError *)err path:(NSString *)path candidates:(NSArray<NSString *> *)candidates {
     NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
     long long size = [attrs[NSFileSize] longLongValue];
     NSData *fileData = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
@@ -258,12 +251,21 @@ static NSString *const kInjectScript =
     NSInteger eocdOff = [self findEOCDOffset:fileData];
     NSData *head = fileData.length > 96 ? [fileData subdataWithRange:NSMakeRange(0, 96)] : fileData;
     NSData *tail = fileData.length > 96 ? [fileData subdataWithRange:NSMakeRange(fileData.length - 96, 96)] : fileData;
+    NSMutableString *candList = [NSMutableString string];
+    if (candidates.count) {
+        for (NSUInteger i = 0; i < MIN(candidates.count, 15); i++) {
+            [candList appendFormat:@"%lu. %@\n", (unsigned long)(i + 1), candidates[i]];
+        }
+        if (candidates.count > 15) [candList appendFormat:@"... 共 %lu 个", (unsigned long)candidates.count];
+    } else {
+        [candList appendString:@"(沙盒内未找到 xlsx)"];
+    }
     NSString *msg = [NSString stringWithFormat:
-        @"错误: %@\n路径: %@\n大小: %lld 字节\n文件头: %@ (标准 zip 应为 50 4B 03 04)\nEOCD 偏移: %ld\n\n文件头 96B hex:\n%@\n\n文件尾 96B hex:\n%@\n\nzip 条目:\n%@",
+        @"错误: %@\n路径: %@\n大小: %lld 字节\n文件头: %@ (标准 zip 应为 50 4B 03 04)\nEOCD 偏移: %ld\n\n文件头 96B hex:\n%@\n\n文件尾 96B hex:\n%@\n\n沙盒内 xlsx 候选:\n%@",
         err ? err.localizedDescription : @"解析返回空",
         path, size, magic, (long)eocdOff,
         [self hexDump:head], [self hexDump:tail],
-        [self zipEntryList:path]];
+        candList];
     UIViewController *top = [JSBridge topVC];
     if (!top) return;
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"解析失败详情"
@@ -276,43 +278,41 @@ static NSString *const kInjectScript =
     [top presentViewController:ac animated:YES completion:nil];
 }
 
-#pragma mark - 沙盒扫描最近 xlsx（优先 tmp/fileCache 原始文件，跳过 www 预览副本）
+#pragma mark - 沙盒扫描 xlsx（全沙盒、含 www/fileCache/Documents/Library，按 mtime 降序）
 
-// 在指定目录下找 mtime 最新的 xlsx；skipPath 非空时跳过该子路径
-- (NSString *)latestXlsxUnder:(NSString *)root skipPath:(NSString *)skip {
+- (NSArray<NSString *> *)allXlsxSortedByTime {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *bestPath = nil;
-    NSDate *bestTime = nil;
-    NSDirectoryEnumerator *en = [fm enumeratorAtPath:root];
-    NSString *rel;
-    while ((rel = [en nextObject])) {
-        if (skip && [rel hasPrefix:skip]) continue;
-        NSString *full = [root stringByAppendingPathComponent:rel];
-        if ([full.pathExtension.lowercaseString isEqualToString:@"xlsx"]) {
-            NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
-            NSDate *mt = attrs[NSFileModificationDate];
-            if (!bestTime || [mt compare:bestTime] == NSOrderedDescending) {
-                bestTime = mt;
-                bestPath = full;
+    NSMutableArray *items = [NSMutableArray array]; // {path, time}
+    NSString *home = NSHomeDirectory();
+    NSArray<NSString *> *roots = @[
+        [home stringByAppendingPathComponent:@"tmp"],
+        [home stringByAppendingPathComponent:@"Documents"],
+        [home stringByAppendingPathComponent:@"Library"],
+    ];
+    for (NSString *root in roots) {
+        NSDirectoryEnumerator *en = [fm enumeratorAtPath:root];
+        NSString *rel;
+        while ((rel = [en nextObject])) {
+            NSString *full = [root stringByAppendingPathComponent:rel];
+            if ([full.pathExtension.lowercaseString isEqualToString:@"xlsx"]) {
+                NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
+                NSDate *mt = attrs[NSFileModificationDate];
+                if (mt) [items addObject:@{@"path": full, @"time": mt}];
             }
         }
     }
-    return bestPath;
+    [items sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [b[@"time"] compare:a[@"time"]]; // 最新在前
+    }];
+    NSMutableArray *paths = [NSMutableArray array];
+    for (NSDictionary *d in items) [paths addObject:d[@"path"]];
+    return paths;
 }
 
+// 兼容旧调用
 - (NSString *)findLatestXlsx {
-    NSString *home = NSHomeDirectory();
-    // 1) 优先 tmp/fileCache（微信下载的原始文件）
-    NSString *p = [self latestXlsxUnder:[home stringByAppendingPathComponent:@"tmp/fileCache"] skipPath:nil];
-    if (p) return p;
-    // 2) tmp 其余目录（跳过 www 预览副本）
-    p = [self latestXlsxUnder:[home stringByAppendingPathComponent:@"tmp"] skipPath:@"www"];
-    if (p) return p;
-    // 3) Documents / Library
-    p = [self latestXlsxUnder:[home stringByAppendingPathComponent:@"Documents"] skipPath:nil];
-    if (p) return p;
-    p = [self latestXlsxUnder:[home stringByAppendingPathComponent:@"Library"] skipPath:nil];
-    return p;
+    NSArray *all = [self allXlsxSortedByTime];
+    return all.firstObject;
 }
 
 @end
