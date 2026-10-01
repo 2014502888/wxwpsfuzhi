@@ -9,6 +9,10 @@
 static inline uint16_t R16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static inline uint32_t R32(const uint8_t *p) { return (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24)); }
 
+// zip 签名（注意：字节流是小端存储，数值必须反写）
+// 中央目录条目签名：字节 50 4B 01 02 → 小端数值 0x02014b50
+static const uint32_t kCentralDirSig = 0x02014b50u;
+
 #pragma mark - zip: raw deflate 解压
 
 static NSData *InflateRaw(NSData *comp, NSUInteger expected) {
@@ -41,7 +45,7 @@ static NSInteger FindEOCD(const uint8_t *bytes, NSUInteger len) {
             uint32_t cdStart = R32(bytes + i + 16);
             BOOL valid = (cdStart + cdSize <= len);
             if (valid) {
-                if (entries == 0 || (cdStart + 4 <= len && R32(bytes + cdStart) == 0x504b0102)) {
+                if (entries == 0 || (cdStart + 4 <= len && R32(bytes + cdStart) == kCentralDirSig)) {
                     return (NSInteger)i;
                 }
             }
@@ -68,7 +72,7 @@ static NSData *ZipEntryData(NSData *zip, NSString *name) {
 
     for (uint16_t e = 0; e < cdEntries; e++) {
         if (p + 46 > len) break;
-        if (R32(bytes + p) != 0x504b0102) break;
+        if (R32(bytes + p) != kCentralDirSig) break;
         uint16_t method = R16(bytes + p + 10);
         uint32_t compSize = R32(bytes + p + 20);
         uint32_t uncompSize = R32(bytes + p + 24);
@@ -267,7 +271,7 @@ static NSInteger RowNumberFromRef(NSString *ref) {
     NSMutableArray *names = [NSMutableArray array];
     for (uint16_t e = 0; e < cdEntries; e++) {
         if (p + 46 > len) break;
-        if (R32(bytes + p) != 0x504b0102) break;
+        if (R32(bytes + p) != kCentralDirSig) break;
         uint16_t nameLen = R16(bytes + p + 28);
         uint16_t extraLen = R16(bytes + p + 30);
         uint16_t commentLen = R16(bytes + p + 32);
@@ -387,7 +391,7 @@ static NSInteger RowNumberFromRef(NSString *ref) {
     for (uint16_t e = 0; e < cdEntries; e++) {
         if (p + 46 > len) { [t appendFormat:@"[%u] p+46>len p=%u len=%lu\n", e, p, (unsigned long)len]; break; }
         uint32_t sig = R32(bytes + p);
-        if (sig != 0x504b0102) { [t appendFormat:@"[%u] bad sig 0x%08X p=%u\n", e, sig, p]; break; }
+        if (sig != kCentralDirSig) { [t appendFormat:@"[%u] bad sig 0x%08X p=%u\n", e, sig, p]; break; }
         uint16_t nameLen = R16(bytes + p + 28);
         uint16_t extraLen = R16(bytes + p + 30);
         uint16_t commentLen = R16(bytes + p + 32);
