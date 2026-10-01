@@ -373,15 +373,14 @@ static NSInteger RowNumberFromRef(NSString *ref) {
 + (NSDictionary<NSNumber *, NSNumber *> *)columnCountsAtPath:(NSString *)path error:(NSError **)error {
     NSDictionary *rows = [self parseRowsAtPath:path error:error];
     if (!rows) return nil;
-    // 每列记录最后非空行号（按行号口径，含表头行 1）
+    // 非空计数：parseRowsAtPath 已 trim，非空才入库（数字/点/符号都算内容；纯空格算空白被剔除）
     NSMutableDictionary *counts = [NSMutableDictionary dictionary];
     for (NSNumber *r in rows) {
         NSDictionary *rowDict = rows[r];
         for (NSNumber *c in rowDict) {
             NSString *v = rowDict[c];
             if (v.length > 0) {
-                NSNumber *last = counts[c];
-                if (!last || r.integerValue > last.integerValue) counts[c] = r;
+                counts[c] = @(counts[c].integerValue + 1);
             }
         }
     }

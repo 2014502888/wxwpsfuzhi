@@ -19,7 +19,7 @@
 // 列号 → 字母（1→A, 27→AA）
 + (NSString *)columnLetter:(NSInteger)col;
 
-// 统计每列行数（按行号口径，含表头）：列号(1-based) → 该列最后非空行号
+// 统计每列非空行数（非空计数口径）：列号(1-based) → 该列有内容(trim后非空)的单元格数量；中间留空扣除
 + (NSDictionary<NSNumber *, NSNumber *> *)columnCountsAtPath:(NSString *)path error:(NSError **)error;
 
 @end
