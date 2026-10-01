@@ -14,8 +14,8 @@ static const char *kBridgeObjKey = "wxExcelCopyBridge";
 
 static NSString *const kInjectScript =
 @"(function(){"
-"  if (window.__wxExcelCopyInjected) return;"
-"  window.__wxExcelCopyInjected = true;"
+"  if (document.__wxExcelCopyInjected) return;"
+"  document.__wxExcelCopyInjected = true;"
 "  function post(o){ try{ window.webkit.messageHandlers.wxExcelCopy.postMessage(o); }catch(e){} }"
 "  function flash(el){ if(!el)return; var o=el.style.backgroundColor; el.style.backgroundColor='#ffe066'; setTimeout(function(){ el.style.backgroundColor=o; },400); }"
 "  document.addEventListener('click',function(e){"
