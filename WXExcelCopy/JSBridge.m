@@ -81,15 +81,29 @@ static NSString *const kInjectScript =
     }
 }
 
-#pragma mark - dump 诊断日志
+#pragma mark - dump 诊断（弹窗展示 + 复制，沙盒文件普通方式看不到）
+
+- (UIViewController *)topViewController {
+    UIWindow *keyWindow = nil;
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        if (w.isKeyWindow) { keyWindow = w; break; }
+    }
+    if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
+    UIViewController *vc = keyWindow.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    return vc;
+}
 
 - (void)handleDump:(NSDictionary *)body {
-    NSMutableString *line = [NSMutableString string];
-    [line appendFormat:@"\n[%@] url=%@\n", [NSDate date], body[@"url"] ?: @""];
-    [line appendFormat:@"tables=%@ tds=%@ grids=%@ canvases=%@ title=%@ cls=%@ sample=%@\n",
-        body[@"tables"], body[@"tds"], body[@"grids"], body[@"canvases"],
+    NSString *diag = [NSString stringWithFormat:
+        @"URL: %@\ntables: %@  tds: %@  grids: %@  canvases: %@\ntitle: %@\nbodyCls: %@\nsample: %@",
+        body[@"url"] ?: @"", body[@"tables"] ?: @"0", body[@"tds"] ?: @"0",
+        body[@"grids"] ?: @"0", body[@"canvases"] ?: @"0",
         body[@"title"] ?: @"", body[@"cls"] ?: @"", body[@"sample"] ?: @""];
+
+    // 备份到沙盒日志（有文件工具时可用）
     NSString *logPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/wxExcelCopy_log.txt"];
+    NSString *line = [NSString stringWithFormat:@"\n[%@]\n%@\n", [NSDate date], diag];
     @synchronized (self) {
         NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
         if (!fh) {
@@ -104,6 +118,21 @@ static NSString *const kInjectScript =
             } @catch (NSException *e) {}
         }
     }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = [self topViewController];
+        if (!top) return;
+        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"WXExcelCopy 诊断"
+                                                                    message:diag
+                                                             preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"复制诊断信息"
+                                               style:UIAlertActionStyleDefault
+                                             handler:^(UIAlertAction *a) {
+            [UIPasteboard generalPasteboard].string = diag;
+        }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+        [top presentViewController:ac animated:YES completion:nil];
+    });
 }
 
 #pragma mark - 点击单元格 → 复制本列往下

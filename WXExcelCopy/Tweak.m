@@ -6,6 +6,7 @@
 #import <objc/runtime.h>
 #import <WebKit/WebKit.h>
 #import "JSBridge.h"
+#import "Toast.h"
 
 #pragma mark - Runtime helpers
 
@@ -72,6 +73,15 @@ static WKWebView *FindWebViewInView(UIView *view, NSInteger depth) {
         }
 
         NSLog(@"[WXExcelCopy] hook installed on %@", NSStringFromClass(cls));
+
+        // 注入成功确认：首次启动弹一次 Toast（后续不再弹，避免打扰）
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        if (![ud boolForKey:@"wxExcelCopy_loaded_tip"]) {
+            [ud setBool:YES forKey:@"wxExcelCopy_loaded_tip"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [Toast show:@"WXExcelCopy 插件已加载"];
+            });
+        }
     });
 }
 
