@@ -18,17 +18,23 @@ static NSString *const kInjectScript =
 "  window.__wxExcelCopyInjected = true;"
 "  function post(o){ try{ window.webkit.messageHandlers.wxExcelCopy.postMessage(o); }catch(e){} }"
 "  document.addEventListener('click',function(e){"
-"    var el=e.target||e.srcElement; if(!el)return; var info=null;"
+"    var el=e.target||e.srcElement; if(!el)return;"
+"    // 统计条列项：点 A 列 N 行 → 复制该列整列"
+"    var cs=el.closest?el.closest('[data-col]'):null;"
+"    if(cs){ var c=parseInt(cs.getAttribute('data-col'),10); if(!isNaN(c)&&c>0){ post({type:'col',col:c}); return; } }"
+"    var info=null;"
 "    var td=el.closest?el.closest('td,th'):null;"
 "    if(td&&td.parentElement){"
 "      var tr=td.parentElement;"
-"      var row=tr.rowIndex, col=td.cellIndex;"
-"      if(row>=0&&col>=0) info={row:row,col:col,mode:'table'};"
+"      var row, col;"
+"      if(window.__wxExcelCopyHeader){ row=tr.rowIndex; col=td.cellIndex; }"
+"      else { row=tr.rowIndex+1; col=td.cellIndex+1; }"
+"      if(row>=1&&col>=1) info={row:row,col:col,mode:'table'};"
 "    }"
 "    if(!info){"
 "      var g=el.closest?el.closest('[data-row],[data-col]'):null;"
-"      if(g){ var r=parseInt(g.getAttribute('data-row'),10), c=parseInt(g.getAttribute('data-col'),10);"
-"        if(!isNaN(r)&&!isNaN(c)) info={row:r,col:c,mode:'grid'}; }"
+"      if(g){ var r=parseInt(g.getAttribute('data-row'),10), c2=parseInt(g.getAttribute('data-col'),10);"
+"        if(!isNaN(r)&&!isNaN(c2)&&r>0&&c2>0) info={row:r,col:c2,mode:'grid'}; }"
 "    }"
 "    if(info) post({type:'cell',row:info.row,col:info.col,mode:info.mode,url:location.href});"
 "  },true);"
@@ -64,7 +70,85 @@ static NSString *const kInjectScript =
     NSDictionary *body = message.body;
     if ([body[@"type"] isEqualToString:@"cell"]) {
         [self handleCell:body];
+    } else if ([body[@"type"] isEqualToString:@"col"]) {
+        [self handleCol:body];
     }
+}
+
+#pragma mark - 注入列标行（A/B/C）+ 行号列（表头=1），类似 WPS 表格
+
++ (void)injectRowColHeaderInto:(WKWebView *)webView {
+    if (!webView) return;
+    NSString *js =
+    @"(function(){"
+    "  if(window.__wxExcelCopyRowCol) return;"
+    "  window.__wxExcelCopyRowCol=true;"
+    "  var t=document.querySelector('table');"
+    "  if(!t||!t.rows||!t.rows.length) return;"
+    "  var rows=t.rows;"
+    "  var colW=[]; var f=rows[0];"
+    "  for(var i=0;i<f.cells.length;i++){ colW.push(f.cells[i].getBoundingClientRect().width); }"
+    "  var cellStyle='padding:2px 8px;text-align:center;font-size:11px;color:#999;background:#f2f2f2;"
+    "border-right:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;white-space:nowrap;';"
+    "  for(var r=0;r<rows.length;r++){"
+    "    var td=document.createElement('td');"
+    "    td.textContent=String(r+1);"
+    "    td.style.cssText=cellStyle;"
+    "    rows[r].insertBefore(td, rows[r].firstChild);"
+    "  }"
+    "  function colLetter(n){ var s=''; while(n>0){ n--; s=String.fromCharCode(65+(n%26))+s; n=Math.floor(n/26); } return s||'A'; }"
+    "  var hr=document.createElement('tr');"
+    "  var hd=document.createElement('td');"
+    "  hd.textContent='';"
+    "  hd.style.cssText='padding:2px 8px;background:#f2f2f2;border-right:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;';"
+    "  hr.appendChild(hd);"
+    "  var headStyle='padding:3px 8px;text-align:center;font-size:11px;font-weight:600;color:#666;"
+    "background:#f2f2f2;border-right:1px solid #e5e5e5;border-bottom:1px solid #e5e5e5;white-space:nowrap;';"
+    "  for(var c=0;c<colW.length;c++){"
+    "    var h=document.createElement('td');"
+    "    h.textContent=colLetter(c+1);"
+    "    h.style.cssText=headStyle;"
+    "    if(colW[c]&&colW[c]>0) h.style.width=colW[c]+'px';"
+    "    hr.appendChild(h);"
+    "  }"
+    "  t.insertBefore(hr, t.firstChild);"
+    "  window.__wxExcelCopyHeader=true;"
+    "})();";
+    [webView evaluateJavaScript:js completionHandler:nil];
+}
+
+#pragma mark - 统计条点击列项 → 复制整列（含表头）
+
+- (void)handleCol:(NSDictionary *)body {
+    NSInteger col = [body[@"col"] integerValue];
+    if (col < 1) return;
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSArray<NSString *> *candidates = [self allXlsxSortedByTime];
+        NSArray<NSString *> *lines = nil;
+        NSError *lastErr = nil;
+        for (NSString *p in candidates) {
+            NSError *e = nil;
+            NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 error:&e]; // 从第 1 行（含表头）
+            if (l && !e) { lines = l; break; }
+            lastErr = e;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!lines || lastErr) {
+                [Toast show:@"未找到可用文件"];
+                return;
+            }
+            if (lines.count == 0) {
+                [Toast show:@"该列无数据"];
+                return;
+            }
+            NSString *joined = [lines componentsJoinedByString:@"\n"];
+            [UIPasteboard generalPasteboard].string = joined;
+            NSString *letter = [XLSXParser columnLetter:col];
+            [Toast show:[NSString stringWithFormat:@"复制%@1-%@%lu共%lu条",
+                         letter, letter, (unsigned long)lines.count, (unsigned long)lines.count]];
+        });
+    });
 }
 
 #pragma mark - 预览页抬头下方插入列统计条（页面内容一部分，不悬浮）
@@ -80,27 +164,24 @@ static NSString *const kInjectScript =
         // 找最新可解析 xlsx（逐个试，第一个成功即可）
         NSArray<NSString *> *candidates = [self allXlsxSortedByTime];
         NSDictionary *counts = nil;
-        NSInteger totalRows = 0;
         for (NSString *p in candidates) {
             NSError *e = nil;
-            NSInteger mRow = 0;
-            NSDictionary *c = [XLSXParser columnCountsAtPath:p maxRow:&mRow error:&e];
-            if (c && !e) { counts = c; totalRows = mRow; break; }
+            NSDictionary *c = [XLSXParser columnCountsAtPath:p error:&e];
+            if (c && !e) { counts = c; break; }
         }
         if (!counts || counts.count == 0) return; // 静默：无可用文件
 
-        // 组装统计文本：共 N 行 · A 列 X 行 · B 列 Y 行...
+        // 组装统计文本：A 列 200 行 · B 列 180 行 ...（每项可点击，data-col=列号）
         NSArray *sortedCols = [counts.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
             return [a compare:b];
         }];
         NSMutableArray *parts = [NSMutableArray array];
         for (NSNumber *col in sortedCols) {
-            [parts addObject:[NSString stringWithFormat:@"%@ 列 %@ 行",
+            [parts addObject:[NSString stringWithFormat:@"<span data-col=\"%ld\" style=\"color:#576b95;text-decoration:underline;\">%@ 列 %@ 行</span>",
+                              (long)col.integerValue,
                               [XLSXParser columnLetter:col.integerValue], counts[col]]];
         }
-        NSString *statText = [NSString stringWithFormat:@"共 %ld 行 · %@",
-                              (long)totalRows,
-                              [parts componentsJoinedByString:@" · "]];
+        NSString *statText = [parts componentsJoinedByString:@"&nbsp;·&nbsp;"];
 
         // 主线程注入 div 到 body 最前（表格上方，紧跟页面抬头下方）
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -114,8 +195,8 @@ static NSString *const kInjectScript =
                 "  d.id='wxExcelCopyStats';"
                 "  d.style.cssText='display:block;padding:9px 12px;font-size:13px;color:#333;"
                 "background:#f7f7f7;border-bottom:1px solid #e8e8e8;white-space:normal;"
-                "word-break:break-all;line-height:1.5;';"
-                "  d.textContent=\"%@\";"
+                "word-break:break-all;line-height:1.6;';"
+                "  d.innerHTML=\"%@\";"
                 "  var b=document.body;"
                 "  if(!b) return;"
                 "  b.insertBefore(d, b.firstChild);"
@@ -128,8 +209,10 @@ static NSString *const kInjectScript =
 #pragma mark - 点击单元格 → 复制本列往下
 
 - (void)handleCell:(NSDictionary *)body {
-    NSInteger row = [body[@"row"] integerValue] + 1; // DOM 0-based → Excel 1-based
-    NSInteger col = [body[@"col"] integerValue] + 1;
+    // row/col 已由 JS 换算为 Excel 1-based（含列标行/行号列偏移）
+    NSInteger row = [body[@"row"] integerValue];
+    NSInteger col = [body[@"col"] integerValue];
+    if (row < 1 || col < 1) return;
 
     // 后台解析，避免卡微信主线程
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
