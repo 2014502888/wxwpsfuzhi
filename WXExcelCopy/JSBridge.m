@@ -41,7 +41,7 @@ static NSString *const kInjectScript =
 "      if(g){ var r=parseInt(g.getAttribute('data-row'),10), c=parseInt(g.getAttribute('data-col'),10);"
 "        if(!isNaN(r)&&!isNaN(c)) info={row:r,col:c,mode:'grid'}; }"
 "    }"
-"    if(info) post({type:'cell',row:info.row,col:info.col,mode:info.mode});"
+"    if(info) post({type:'cell',row:info.row,col:info.col,mode:info.mode,url:location.href});"
 "  },true);"
 "})();";
 
@@ -159,21 +159,23 @@ static NSString *const kInjectScript =
 
     // 后台解析，避免卡微信主线程
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSString *xlsxPath = [self findLatestXlsx];
-        if (!xlsxPath) {
+        // 优先用预览 URL 直接定位文件（最可靠），找不到再扫沙盒
+        NSString *path = [self xlsxPathFromURL:body[@"url"]];
+        if (!path) path = [self findLatestXlsx];
+        if (!path) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 [Toast show:@"未找到 xlsx 文件"];
             });
             return;
         }
         NSError *err = nil;
-        NSArray<NSString *> *lines = [XLSXParser columnLinesAtPath:xlsxPath
+        NSArray<NSString *> *lines = [XLSXParser columnLinesAtPath:path
                                                             column:col
                                                            fromRow:row
                                                              error:&err];
         dispatch_async(dispatch_get_main_queue(), ^{
             if (err || !lines) {
-                [Toast show:@"解析失败，请重试"];
+                [self showParseError:err path:path];
                 return;
             }
             if (lines.count == 0) {
@@ -188,6 +190,47 @@ static NSString *const kInjectScript =
                          letter, (long)row, letter, (unsigned long)lastRow, (unsigned long)lines.count]];
         });
     });
+}
+
+// 从 file:// URL 提取 xlsx 路径
+- (NSString *)xlsxPathFromURL:(NSString *)url {
+    if (!url.length) return nil;
+    NSString *p = url;
+    if ([p hasPrefix:@"file://"]) p = [p substringFromIndex:7];
+    p = [p stringByRemovingPercentEncoding];
+    if (![p.pathExtension.lowercaseString isEqualToString:@"xlsx"]) return nil;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:p]) return p;
+    return nil;
+}
+
+// 解析失败 → 弹详细错误（含文件魔数判断是否标准 xlsx）
+- (void)showParseError:(NSError *)err path:(NSString *)path {
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    long long size = [attrs[NSFileSize] longLongValue];
+    NSData *head = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+    NSString *magic = @"(读不到)";
+    if (head.length >= 4) {
+        const uint8_t *b = head.bytes;
+        magic = [NSString stringWithFormat:@"%02X %02X %02X %02X", b[0], b[1], b[2], b[3]];
+    } else if (head.length == 0) {
+        magic = @"(空文件)";
+    } else {
+        magic = [NSString stringWithFormat:@"(%lu 字节)", (unsigned long)head.length];
+    }
+    NSString *msg = [NSString stringWithFormat:
+        @"错误: %@\n路径: %@\n大小: %lld 字节\n文件头: %@\n(标准 xlsx 应为 50 4B 03 04)",
+        err ? err.localizedDescription : @"解析返回空",
+        path, size, magic];
+    UIViewController *top = [JSBridge topVC];
+    if (!top) return;
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"解析失败详情"
+                                                                message:msg
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"复制" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [UIPasteboard generalPasteboard].string = msg;
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+    [top presentViewController:ac animated:YES completion:nil];
 }
 
 #pragma mark - 沙盒扫描最近 xlsx
