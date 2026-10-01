@@ -370,4 +370,26 @@ static NSInteger RowNumberFromRef(NSString *ref) {
     return s.length ? s : @"A";
 }
 
++ (NSDictionary<NSNumber *, NSNumber *> *)columnCountsAtPath:(NSString *)path
+                                                      maxRow:(NSInteger *)maxRow
+                                                       error:(NSError **)error {
+    NSDictionary *rows = [self parseRowsAtPath:path error:error];
+    if (!rows) return nil;
+    NSMutableDictionary *counts = [NSMutableDictionary dictionary];
+    NSInteger mRow = 0;
+    for (NSNumber *r in rows) {
+        if (r.integerValue > mRow) mRow = r.integerValue;
+        NSDictionary *rowDict = rows[r];
+        for (NSNumber *c in rowDict) {
+            NSString *v = rowDict[c];
+            if (v.length > 0) {
+                NSNumber *cur = counts[c];
+                counts[c] = @(cur.integerValue + 1);
+            }
+        }
+    }
+    if (maxRow) *maxRow = mRow;
+    return counts;
+}
+
 @end

@@ -67,6 +67,64 @@ static NSString *const kInjectScript =
     }
 }
 
+#pragma mark - 预览页抬头下方插入列统计条（页面内容一部分，不悬浮）
+
++ (void)injectColumnStatsInto:(WKWebView *)webView {
+    if (!webView) return;
+    JSBridge *bridge = [[JSBridge alloc] init];
+    [bridge doInjectColumnStatsInto:webView];
+}
+
+- (void)doInjectColumnStatsInto:(WKWebView *)webView {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // 找最新可解析 xlsx（逐个试，第一个成功即可）
+        NSArray<NSString *> *candidates = [self allXlsxSortedByTime];
+        NSDictionary *counts = nil;
+        NSInteger totalRows = 0;
+        for (NSString *p in candidates) {
+            NSError *e = nil;
+            NSInteger mRow = 0;
+            NSDictionary *c = [XLSXParser columnCountsAtPath:p maxRow:&mRow error:&e];
+            if (c && !e) { counts = c; totalRows = mRow; break; }
+        }
+        if (!counts || counts.count == 0) return; // 静默：无可用文件
+
+        // 组装统计文本：共 N 行 · A 列 X 行 · B 列 Y 行...
+        NSArray *sortedCols = [counts.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+            return [a compare:b];
+        }];
+        NSMutableArray *parts = [NSMutableArray array];
+        for (NSNumber *col in sortedCols) {
+            [parts addObject:[NSString stringWithFormat:@"%@ 列 %@ 行",
+                              [XLSXParser columnLetter:col.integerValue], counts[col]]];
+        }
+        NSString *statText = [NSString stringWithFormat:@"共 %ld 行 · %@",
+                              (long)totalRows,
+                              [parts componentsJoinedByString:@" · "]];
+
+        // 主线程注入 div 到 body 最前（表格上方，紧跟页面抬头下方）
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *escaped = [statText stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+            escaped = [escaped stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+            escaped = [escaped stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"];
+            NSString *js = [NSString stringWithFormat:
+                @"(function(){"
+                "  if (document.getElementById('wxExcelCopyStats')) return;"
+                "  var d=document.createElement('div');"
+                "  d.id='wxExcelCopyStats';"
+                "  d.style.cssText='display:block;padding:9px 12px;font-size:13px;color:#333;"
+                "background:#f7f7f7;border-bottom:1px solid #e8e8e8;white-space:normal;"
+                "word-break:break-all;line-height:1.5;';"
+                "  d.textContent=\"%@\";"
+                "  var b=document.body;"
+                "  if(!b) return;"
+                "  b.insertBefore(d, b.firstChild);"
+                "})();", escaped];
+            [webView evaluateJavaScript:js completionHandler:nil];
+        });
+    });
+}
+
 #pragma mark - 点击单元格 → 复制本列往下
 
 - (void)handleCell:(NSDictionary *)body {
