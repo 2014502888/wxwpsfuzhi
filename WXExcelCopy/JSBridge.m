@@ -264,11 +264,10 @@ static NSString *const kInjectScript =
         if (fdata.length) {
             NSData *fhead = fdata.length > 64 ? [fdata subdataWithRange:NSMakeRange(0, 64)] : fdata;
             NSInteger feocd = [self findEOCDOffset:fdata];
-            NSArray *fentries = [XLSXParser zipEntriesAtPath:first error:nil];
-            [candList appendFormat:@"\n---- 第 1 个文件实际结构 ----\n路径: %@\n大小: %lu B\nEOCD: %ld\n头 64B: %@\n条目(%lu): %@\n",
+            NSString *ftrace = [XLSXParser zipTraceAtPath:first];
+            [candList appendFormat:@"\n---- 第 1 个文件实际结构 ----\n路径: %@\n大小: %lu B\nEOCD(js): %ld\n头 64B: %@\n条目trace:\n%@\n",
                 first, (unsigned long)fdata.length, (long)feocd,
-                [self hexDump:fhead], (unsigned long)(fentries ? fentries.count : 0),
-                fentries.count ? [fentries componentsJoinedByString:@", "] : @"(空)"];
+                [self hexDump:fhead], ftrace];
         }
     } else {
         [candList appendString:@"(沙盒内未找到 xlsx)"];
