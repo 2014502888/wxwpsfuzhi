@@ -17,12 +17,13 @@ static NSString *const kInjectScript =
 "  if (window.__wxExcelCopyInjected) return;"
 "  window.__wxExcelCopyInjected = true;"
 "  function post(o){ try{ window.webkit.messageHandlers.wxExcelCopy.postMessage(o); }catch(e){} }"
+"  function flash(el){ if(!el)return; var o=el.style.backgroundColor; el.style.backgroundColor='#ffe066'; setTimeout(function(){ el.style.backgroundColor=o; },400); }"
 "  document.addEventListener('click',function(e){"
 "    var el=e.target||e.srcElement; if(!el)return;"
 "    if(el.nodeType===3) el=el.parentElement; if(!el)return;"
 "    // 统计条列项：点 A 列 N 行 → 复制该列整列"
 "    var cs=el.closest?el.closest('[data-col]'):null;"
-"    if(cs){ var c=parseInt(cs.getAttribute('data-col'),10); if(!isNaN(c)&&c>0){ post({type:'col',col:c}); return; } }"
+"    if(cs){ var c=parseInt(cs.getAttribute('data-col'),10); if(!isNaN(c)&&c>0){ flash(cs); post({type:'col',col:c}); return; } }"
 "    var info=null;"
 "    var td=el.closest?el.closest('td,th'):null;"
 "    if(td&&td.parentElement){"
@@ -37,7 +38,7 @@ static NSString *const kInjectScript =
 "      if(g){ var r=parseInt(g.getAttribute('data-row'),10), c2=parseInt(g.getAttribute('data-col'),10);"
 "        if(!isNaN(r)&&!isNaN(c2)&&r>0&&c2>0) info={row:r,col:c2,mode:'grid'}; }"
 "    }"
-"    if(info) post({type:'cell',row:info.row,col:info.col,mode:info.mode});"
+"    if(info){ flash(td||g); post({type:'cell',row:info.row,col:info.col,mode:info.mode}); }"
 "  },true);"
 "})();";
 
@@ -79,12 +80,13 @@ static NSString *const kInjectScript =
     if (![message.name isEqualToString:kBridgeName]) return;
     if (![message.body isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *body = message.body;
-    // 当前预览页 URL 优先从 frameInfo 取（比 JS location.href 可靠），用于文件匹配
+    // 当前预览页 URL 优先从 frameInfo 取；拿不到也不能丢弃消息（回退空串，由文件匹配自动回退最新文件）
     NSString *pageURL = message.frameInfo.request.URL.absoluteString ?: @"";
     if (pageURL.length == 0) pageURL = message.webView.URL.absoluteString ?: @"";
-    if (pageURL.length == 0) return;
     NSMutableDictionary *body2 = [body mutableCopy];
-    body2[@"url"] = pageURL;
+    body2[@"url"] = pageURL ?: @"";
+    // 定位提示：确认消息已到原生
+    [Toast show:([body2[@"type"] isEqualToString:@"col"] ? @"收到统计条点击" : @"收到单元格点击")];
     if ([body2[@"type"] isEqualToString:@"cell"]) {
         [self handleCell:body2];
     } else if ([body2[@"type"] isEqualToString:@"col"]) {
