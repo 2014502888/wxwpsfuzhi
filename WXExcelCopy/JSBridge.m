@@ -214,24 +214,51 @@ static NSString *const kInjectScript =
     return list;
 }
 
+- (NSString *)hexDump:(NSData *)d {
+    if (!d || d.length == 0) return @"(空)";
+    NSMutableString *s = [NSMutableString string];
+    const uint8_t *b = d.bytes;
+    NSUInteger n = MIN(d.length, 96);
+    for (NSUInteger i = 0; i < n; i++) [s appendFormat:@"%02X ", b[i]];
+    return s;
+}
+
+// 探测 EOCD：返回偏移，未找到返回 -1
+- (NSInteger)findEOCDOffset:(NSData *)data {
+    const uint8_t *bytes = data.bytes;
+    NSUInteger len = data.length;
+    if (len < 22) return -1;
+    NSUInteger scanMin = (len > 65535 + 22) ? (len - 65535 - 22) : 0;
+    for (NSUInteger i = len - 22; i >= scanMin; i--) {
+        if (bytes[i] == 0x50 && bytes[i+1] == 0x4b && bytes[i+2] == 0x05 && bytes[i+3] == 0x06) {
+            return (NSInteger)i;
+        }
+    }
+    return -1;
+}
+
 // 解析失败 → 弹详细错误（含文件魔数判断是否标准 xlsx）
 - (void)showParseError:(NSError *)err path:(NSString *)path {
     NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
     long long size = [attrs[NSFileSize] longLongValue];
-    NSData *head = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+    NSData *fileData = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
     NSString *magic = @"(读不到)";
-    if (head.length >= 4) {
-        const uint8_t *b = head.bytes;
+    if (fileData.length >= 4) {
+        const uint8_t *b = fileData.bytes;
         magic = [NSString stringWithFormat:@"%02X %02X %02X %02X", b[0], b[1], b[2], b[3]];
-    } else if (head.length == 0) {
+    } else if (fileData.length == 0) {
         magic = @"(空文件)";
     } else {
-        magic = [NSString stringWithFormat:@"(%lu 字节)", (unsigned long)head.length];
+        magic = [NSString stringWithFormat:@"(%lu 字节)", (unsigned long)fileData.length];
     }
+    NSInteger eocdOff = [self findEOCDOffset:fileData];
+    NSData *head = fileData.length > 96 ? [fileData subdataWithRange:NSMakeRange(0, 96)] : fileData;
+    NSData *tail = fileData.length > 96 ? [fileData subdataWithRange:NSMakeRange(fileData.length - 96, 96)] : fileData;
     NSString *msg = [NSString stringWithFormat:
-        @"错误: %@\n路径: %@\n大小: %lld 字节\n文件头: %@\n(标准 xlsx 应为 50 4B 03 04)\n\nzip 条目:\n%@",
+        @"错误: %@\n路径: %@\n大小: %lld 字节\n文件头: %@ (标准 zip 应为 50 4B 03 04)\nEOCD 偏移: %ld\n\n文件头 96B hex:\n%@\n\n文件尾 96B hex:\n%@\n\nzip 条目:\n%@",
         err ? err.localizedDescription : @"解析返回空",
-        path, size, magic,
+        path, size, magic, (long)eocdOff,
+        [self hexDump:head], [self hexDump:tail],
         [self zipEntryList:path]];
     UIViewController *top = [JSBridge topVC];
     if (!top) return;
