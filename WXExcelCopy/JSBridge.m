@@ -257,6 +257,19 @@ static NSString *const kInjectScript =
             [candList appendFormat:@"%lu. %@\n", (unsigned long)(i + 1), candidates[i]];
         }
         if (candidates.count > 15) [candList appendFormat:@"... 共 %lu 个", (unsigned long)candidates.count];
+
+        // 第一个候选文件的真实结构（判断是否标准 zip / 微信是否改过）
+        NSString *first = candidates.firstObject;
+        NSData *fdata = [NSData dataWithContentsOfFile:first options:NSDataReadingMappedIfSafe error:nil];
+        if (fdata.length) {
+            NSData *fhead = fdata.length > 64 ? [fdata subdataWithRange:NSMakeRange(0, 64)] : fdata;
+            NSInteger feocd = [self findEOCDOffset:fdata];
+            NSArray *fentries = [XLSXParser zipEntriesAtPath:first error:nil];
+            [candList appendFormat:@"\n---- 第 1 个文件实际结构 ----\n路径: %@\n大小: %lu B\nEOCD: %ld\n头 64B: %@\n条目(%lu): %@\n",
+                first, (unsigned long)fdata.length, (long)feocd,
+                [self hexDump:fhead], (unsigned long)(fentries ? fentries.count : 0),
+                fentries.count ? [fentries componentsJoinedByString:@", "] : @"(空)"];
+        }
     } else {
         [candList appendString:@"(沙盒内未找到 xlsx)"];
     }

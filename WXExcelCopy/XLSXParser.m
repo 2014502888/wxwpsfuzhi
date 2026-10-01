@@ -28,6 +28,30 @@ static NSData *InflateRaw(NSData *comp, NSUInteger expected) {
     return out;
 }
 
+#pragma mark - zip: 找 EOCD（带验证，防文件内部字节误命中；带下溢保护）
+
+// 返回 EOCD 偏移；未找到返回 -1
+static NSInteger FindEOCD(const uint8_t *bytes, NSUInteger len) {
+    if (len < 22) return -1;
+    NSUInteger scanMin = (len > 65535 + 22) ? (len - 65535 - 22) : 0;
+    for (NSUInteger i = len - 22; i >= scanMin; i--) {
+        if (bytes[i] == 0x50 && bytes[i+1] == 0x4b && bytes[i+2] == 0x05 && bytes[i+3] == 0x06) {
+            uint32_t cdSize = R32(bytes + i + 12);
+            uint16_t entries = R16(bytes + i + 10);
+            uint32_t cdStart = R32(bytes + i + 16);
+            BOOL valid = (cdStart + cdSize <= len);
+            if (valid) {
+                if (entries == 0 || (cdStart + 4 <= len && R32(bytes + cdStart) == 0x504b0102)) {
+                    return (NSInteger)i;
+                }
+            }
+            // 校验失败：可能是内部误命中，继续往前找
+        }
+        if (i == 0) break;
+    }
+    return -1;
+}
+
 #pragma mark - zip: 按文件名取条目
 
 static NSData *ZipEntryData(NSData *zip, NSString *name) {
@@ -35,16 +59,8 @@ static NSData *ZipEntryData(NSData *zip, NSString *name) {
     NSUInteger len = zip.length;
     if (len < 22) return nil;
 
-    // 尾部找 EOCD (PK\x05\x06)，只扫末尾 64KB 注释区
-    NSUInteger eocd = NSNotFound;
-    NSUInteger scanMin = (len > 65535 + 22) ? (len - 65535 - 22) : 0;
-    for (NSUInteger i = len - 22; i >= scanMin; i--) {
-        if (bytes[i] == 0x50 && bytes[i+1] == 0x4b && bytes[i+2] == 0x05 && bytes[i+3] == 0x06) {
-            eocd = i;
-            break;
-        }
-    }
-    if (eocd == NSNotFound) return nil;
+    NSInteger eocd = FindEOCD(bytes, len);
+    if (eocd < 0) return nil;
 
     uint16_t cdEntries = R16(bytes + eocd + 10);
     uint32_t cdStart = R32(bytes + eocd + 16);
@@ -242,15 +258,8 @@ static NSInteger RowNumberFromRef(NSString *ref) {
     NSUInteger len = zip.length;
     if (len < 22) return @[];
 
-    NSUInteger eocd = NSNotFound;
-    NSUInteger scanMin = (len > 65535 + 22) ? (len - 65535 - 22) : 0;
-    for (NSUInteger i = len - 22; i >= scanMin; i--) {
-        if (bytes[i] == 0x50 && bytes[i+1] == 0x4b && bytes[i+2] == 0x05 && bytes[i+3] == 0x06) {
-            eocd = i;
-            break;
-        }
-    }
-    if (eocd == NSNotFound) return @[];
+    NSInteger eocd = FindEOCD(bytes, len);
+    if (eocd < 0) return @[];
 
     uint16_t cdEntries = R16(bytes + eocd + 10);
     uint32_t cdStart = R32(bytes + eocd + 16);
