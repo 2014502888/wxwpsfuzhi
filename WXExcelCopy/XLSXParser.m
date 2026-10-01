@@ -232,6 +232,43 @@ static NSInteger RowNumberFromRef(NSString *ref) {
 
 @implementation XLSXParser
 
++ (NSArray<NSString *> *)zipEntriesAtPath:(NSString *)path error:(NSError **)error {
+    NSData *zip = [NSData dataWithContentsOfFile:path];
+    if (!zip) {
+        if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:1 userInfo:@{NSLocalizedDescriptionKey:@"无法读取文件"}];
+        return nil;
+    }
+    const uint8_t *bytes = zip.bytes;
+    NSUInteger len = zip.length;
+    if (len < 22) return @[];
+
+    NSUInteger eocd = NSNotFound;
+    NSUInteger scanMin = (len > 65535 + 22) ? (len - 65535 - 22) : 0;
+    for (NSUInteger i = len - 22; i >= scanMin; i--) {
+        if (bytes[i] == 0x50 && bytes[i+1] == 0x4b && bytes[i+2] == 0x05 && bytes[i+3] == 0x06) {
+            eocd = i;
+            break;
+        }
+    }
+    if (eocd == NSNotFound) return @[];
+
+    uint16_t cdEntries = R16(bytes + eocd + 10);
+    uint32_t cdStart = R32(bytes + eocd + 16);
+    uint32_t p = cdStart;
+    NSMutableArray *names = [NSMutableArray array];
+    for (uint16_t e = 0; e < cdEntries; e++) {
+        if (p + 46 > len) break;
+        if (R32(bytes + p) != 0x504b0102) break;
+        uint16_t nameLen = R16(bytes + p + 28);
+        uint16_t extraLen = R16(bytes + p + 30);
+        uint16_t commentLen = R16(bytes + p + 32);
+        NSString *n = [[NSString alloc] initWithBytes:(bytes + p + 46) length:nameLen encoding:NSUTF8StringEncoding];
+        if (n) [names addObject:n];
+        p += 46 + nameLen + extraLen + commentLen;
+    }
+    return names;
+}
+
 + (NSDictionary<NSNumber *, NSDictionary<NSNumber *, NSString *> *> *)parseRowsAtPath:(NSString *)path
                                                                                 error:(NSError **)error {
     NSData *zip = [NSData dataWithContentsOfFile:path];
@@ -242,6 +279,18 @@ static NSInteger RowNumberFromRef(NSString *ref) {
 
     NSData *ssXml = ZipEntryData(zip, @"xl/sharedStrings.xml");
     NSData *sheetXml = ZipEntryData(zip, @"xl/worksheets/sheet1.xml");
+    if (!sheetXml) {
+        // 放宽：遍历条目找任意 sheet/worksheet 开头的 xml
+        NSArray *entries = [self zipEntriesAtPath:path error:nil];
+        for (NSString *e in entries) {
+            NSString *low = e.lowercaseString;
+            if ([low hasSuffix:@".xml"] &&
+                ([low containsString:@"sheet"] || [low containsString:@"worksheet"])) {
+                sheetXml = ZipEntryData(zip, e);
+                if (sheetXml) break;
+            }
+        }
+    }
     if (!sheetXml) {
         if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:2 userInfo:@{NSLocalizedDescriptionKey:@"未找到 sheet1.xml"}];
         return nil;

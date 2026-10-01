@@ -203,6 +203,17 @@ static NSString *const kInjectScript =
     return nil;
 }
 
+// zip 条目列表（诊断用）
+- (NSString *)zipEntryList:(NSString *)path {
+    NSArray *entries = [XLSXParser zipEntriesAtPath:path error:nil];
+    if (!entries) return @"(无法读取)";
+    if (entries.count == 0) return @"(空 zip 或无条目)";
+    NSArray *head = entries.count > 25 ? [entries subarrayWithRange:NSMakeRange(0, 25)] : entries;
+    NSString *list = [head componentsJoinedByString:@"\n"];
+    if (entries.count > 25) list = [list stringByAppendingFormat:@"\n... 共 %lu 条", (unsigned long)entries.count];
+    return list;
+}
+
 // 解析失败 → 弹详细错误（含文件魔数判断是否标准 xlsx）
 - (void)showParseError:(NSError *)err path:(NSString *)path {
     NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
@@ -218,9 +229,10 @@ static NSString *const kInjectScript =
         magic = [NSString stringWithFormat:@"(%lu 字节)", (unsigned long)head.length];
     }
     NSString *msg = [NSString stringWithFormat:
-        @"错误: %@\n路径: %@\n大小: %lld 字节\n文件头: %@\n(标准 xlsx 应为 50 4B 03 04)",
+        @"错误: %@\n路径: %@\n大小: %lld 字节\n文件头: %@\n(标准 xlsx 应为 50 4B 03 04)\n\nzip 条目:\n%@",
         err ? err.localizedDescription : @"解析返回空",
-        path, size, magic];
+        path, size, magic,
+        [self zipEntryList:path]];
     UIViewController *top = [JSBridge topVC];
     if (!top) return;
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"解析失败详情"
