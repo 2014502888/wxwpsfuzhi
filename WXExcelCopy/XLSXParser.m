@@ -380,7 +380,8 @@ static NSInteger RowNumberFromRef(NSString *ref) {
         for (NSNumber *c in rowDict) {
             NSString *v = rowDict[c];
             if (v.length > 0) {
-                counts[c] = @(counts[c].integerValue + 1);
+                NSNumber *prev = counts[c];
+                counts[c] = @(prev.integerValue + 1);
             }
         }
     }
