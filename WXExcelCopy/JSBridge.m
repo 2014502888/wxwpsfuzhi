@@ -278,29 +278,47 @@ static NSString *const kInjectScript =
     [top presentViewController:ac animated:YES completion:nil];
 }
 
-#pragma mark - 沙盒扫描 xlsx（全沙盒、含 www/fileCache/Documents/Library，按 mtime 降序）
+#pragma mark - xlsx 扫描（轻量：只扫 fileCache/www/Documents 浅层，限量防内存爆炸）
 
 - (NSArray<NSString *> *)allXlsxSortedByTime {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableArray *items = [NSMutableArray array]; // {path, time}
     NSString *home = NSHomeDirectory();
-    NSArray<NSString *> *roots = @[
-        [home stringByAppendingPathComponent:@"tmp"],
-        [home stringByAppendingPathComponent:@"Documents"],
-        [home stringByAppendingPathComponent:@"Library"],
+
+    // 1) tmp/fileCache 与 tmp/www（微信预览/缓存目录，递归，限量）
+    NSArray<NSString *> *subs = @[
+        [home stringByAppendingPathComponent:@"tmp/fileCache"],
+        [home stringByAppendingPathComponent:@"tmp/www"],
     ];
-    for (NSString *root in roots) {
+    for (NSString *root in subs) {
         NSDirectoryEnumerator *en = [fm enumeratorAtPath:root];
         NSString *rel;
+        NSUInteger scanned = 0;
         while ((rel = [en nextObject])) {
+            if (++scanned > 20000) break;
             NSString *full = [root stringByAppendingPathComponent:rel];
             if ([full.pathExtension.lowercaseString isEqualToString:@"xlsx"]) {
                 NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
                 NSDate *mt = attrs[NSFileModificationDate];
                 if (mt) [items addObject:@{@"path": full, @"time": mt}];
+                if (items.count >= 50) break;
             }
         }
     }
+
+    // 2) Documents 浅层（只第一层文件，兜底）
+    NSString *docRoot = [home stringByAppendingPathComponent:@"Documents"];
+    NSArray *docFiles = [fm contentsOfDirectoryAtPath:docRoot error:nil];
+    for (NSString *name in docFiles) {
+        if (name.pathExtension.lowercaseString.length == 0) continue;
+        if ([name.pathExtension.lowercaseString isEqualToString:@"xlsx"]) {
+            NSString *full = [docRoot stringByAppendingPathComponent:name];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
+            NSDate *mt = attrs[NSFileModificationDate];
+            if (mt) [items addObject:@{@"path": full, @"time": mt}];
+        }
+    }
+
     [items sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         return [b[@"time"] compare:a[@"time"]]; // 最新在前
     }];
