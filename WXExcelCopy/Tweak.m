@@ -69,11 +69,6 @@ static WKWebView *FindWebViewInView(UIView *view, NSInteger depth) {
                 ((void(*)(id, SEL, id, id))origFinish)(self, selFinish, wv, nav);
                 [JSBridge injectInto:wv];
                 [JSBridge ensureInjected:wv]; // 补挂 handler + 当前页立即注入点击脚本
-                // xlsx 预览页：抬头下方插入列统计条（纯显示）
-                NSString *u = wv.URL.absoluteString.lowercaseString ?: @"";
-                if ([u containsString:@"xlsx"] || [u containsString:@"sheet"]) {
-                    [JSBridge injectColumnStatsInto:wv url:wv.URL.absoluteString ?: @""];
-                }
             });
             method_setImplementation(mFinish, newFinish);
         }

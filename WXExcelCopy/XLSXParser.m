@@ -8,6 +8,7 @@
 
 static inline uint16_t R16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static inline uint32_t R32(const uint8_t *p) { return (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24)); }
+static inline uint64_t R64(const uint8_t *p) { return (uint64_t)R32(p) | ((uint64_t)R32(p + 4) << 32); }
 
 // zip 签名（注意：字节流是小端存储，数值必须反写）
 // 中央目录条目签名：字节 50 4B 01 02 → 小端数值 0x02014b50
@@ -22,6 +23,7 @@ static NSData *InflateRaw(NSData *comp, NSUInteger expected) {
     strm.next_in = (Bytef *)comp.bytes;
     strm.avail_in = (uInt)comp.length;
     NSUInteger cap = expected ? expected : (comp.length * 4 + 4096);
+    if (cap > 64 * 1024 * 1024) cap = 64 * 1024 * 1024; // 上限保护：防损坏文件声明的超大解压长度
     NSMutableData *out = [NSMutableData dataWithLength:cap];
     strm.next_out = out.mutableBytes;
     strm.avail_out = (uInt)out.length;
@@ -68,29 +70,61 @@ static NSData *ZipEntryData(NSData *zip, NSString *name) {
 
     uint16_t cdEntries = R16(bytes + eocd + 10);
     uint32_t cdStart = R32(bytes + eocd + 16);
-    uint32_t p = cdStart;
+    uint64_t p = cdStart; // 64 位游标：防损坏文件 cdStart/nameLen 污染后 32 位溢出回绕
 
     for (uint16_t e = 0; e < cdEntries; e++) {
-        if (p + 46 > len) break;
-        if (R32(bytes + p) != kCentralDirSig) break;
-        uint16_t method = R16(bytes + p + 10);
-        uint32_t compSize = R32(bytes + p + 20);
-        uint32_t uncompSize = R32(bytes + p + 24);
-        uint16_t nameLen = R16(bytes + p + 28);
-        uint16_t extraLen = R16(bytes + p + 30);
-        uint16_t commentLen = R16(bytes + p + 32);
-        uint32_t localOff = R32(bytes + p + 42);
+        if (p + 46 > (uint64_t)len) break;
+        if (R32(bytes + (NSUInteger)p) != kCentralDirSig) break;
+        uint16_t method = R16(bytes + (NSUInteger)p + 10);
+        uint32_t compSize = R32(bytes + (NSUInteger)p + 20);
+        uint32_t uncompSize = R32(bytes + (NSUInteger)p + 24);
+        uint16_t nameLen = R16(bytes + (NSUInteger)p + 28);
+        uint16_t extraLen = R16(bytes + (NSUInteger)p + 30);
+        uint16_t commentLen = R16(bytes + (NSUInteger)p + 32);
+        uint32_t localOff = R32(bytes + (NSUInteger)p + 42);
 
-        NSString *n = [[NSString alloc] initWithBytes:(bytes + p + 46) length:nameLen encoding:NSUTF8StringEncoding];
+        if (p + 46 + nameLen > (uint64_t)len) break; // 读文件名前边界检查
+        NSString *n = [[NSString alloc] initWithBytes:(bytes + (NSUInteger)p + 46) length:nameLen encoding:NSUTF8StringEncoding];
         if (n && [n.lowercaseString isEqualToString:name.lowercaseString]) {
-            if (localOff + 30 > len) return nil;
-            uint16_t lNameLen = R16(bytes + localOff + 26);
-            uint16_t lExtraLen = R16(bytes + localOff + 28);
-            uint32_t dataOff = localOff + 30 + lNameLen + lExtraLen;
-            if (dataOff + compSize > len) return nil;
-            NSData *comp = [zip subdataWithRange:NSMakeRange(dataOff, compSize)];
+            // zip64 支持：compSize/uncompSize/localOff 为 0xFFFFFFFF 占位时，真实值在 zip64 extra 字段(id 0x0001)
+            uint64_t compSizeU = compSize, uncompSizeU = uncompSize, localOffU = localOff;
+            if (compSize == 0xFFFFFFFFu || uncompSize == 0xFFFFFFFFu || localOff == 0xFFFFFFFFu) {
+                uint64_t ex = (uint64_t)p + 46 + nameLen;
+                uint64_t exEnd = ex + extraLen;
+                if (exEnd > (uint64_t)len) exEnd = (uint64_t)len;
+                while (ex + 4 <= exEnd) {
+                    uint16_t hId = R16(bytes + (NSUInteger)ex);
+                    uint16_t hLen = R16(bytes + (NSUInteger)ex + 2);
+                    uint64_t hEnd = ex + 4 + hLen;
+                    if (hEnd > exEnd) break;
+                    if (hId == 0x0001) { // zip64 extra：字段按 uncomp→comp→localOff 顺序依次出现
+                        uint64_t epos = ex + 4;
+                        if (uncompSize == 0xFFFFFFFFu && epos + 8 <= hEnd) { uncompSizeU = R64(bytes + (NSUInteger)epos); epos += 8; }
+                        if (compSize == 0xFFFFFFFFu && epos + 8 <= hEnd) { compSizeU = R64(bytes + (NSUInteger)epos); epos += 8; }
+                        if (localOff == 0xFFFFFFFFu && epos + 8 <= hEnd) { localOffU = R64(bytes + (NSUInteger)epos); epos += 8; }
+                    }
+                    ex = hEnd;
+                }
+            }
+            if (localOffU + 30 > (uint64_t)len) return nil;
+            uint16_t lNameLen = R16(bytes + (NSUInteger)localOffU + 26);
+            uint16_t lExtraLen = R16(bytes + (NSUInteger)localOffU + 28);
+            uint64_t dataOff = localOffU + 30 + lNameLen + lExtraLen;
+            // 本地头声明的压缩长度若与中央目录不一致（截断/错位文件）：取较小且落在文件内的值
+            uint32_t lCompSize = R32(bytes + (NSUInteger)localOffU + 18);
+            uint64_t remain = (uint64_t)len - (uint64_t)dataOff;
+            if (lCompSize != compSize) {
+                if ((uint64_t)lCompSize < compSizeU && (uint64_t)lCompSize <= remain) {
+                    compSizeU = lCompSize;
+                } else if (compSizeU > remain) {
+                    return nil;
+                }
+            }
+            // 64 位比较防加法溢出（损坏文件 compSize 可被污染为超大值）
+            if (dataOff + compSizeU > (uint64_t)len) return nil;
+            NSData *comp = [zip subdataWithRange:NSMakeRange((NSUInteger)dataOff, (NSUInteger)compSizeU)];
             if (method == 0) return comp;
-            if (method == 8) return InflateRaw(comp, uncompSize);
+            if (method == 8) return InflateRaw(comp, (NSUInteger)uncompSizeU);
             return nil;
         }
         p += 46 + nameLen + extraLen + commentLen;
@@ -99,7 +133,6 @@ static NSData *ZipEntryData(NSData *zip, NSString *name) {
 }
 
 #pragma mark - 列字母 ↔ 数字
-
 static NSInteger ColumnNumberFromRef(NSString *ref) {
     NSInteger num = 0;
     for (NSUInteger i = 0; i < ref.length; i++) {
@@ -267,15 +300,16 @@ static NSInteger RowNumberFromRef(NSString *ref) {
 
     uint16_t cdEntries = R16(bytes + eocd + 10);
     uint32_t cdStart = R32(bytes + eocd + 16);
-    uint32_t p = cdStart;
+    uint64_t p = cdStart; // 64 位游标：防损坏文件 cdStart/nameLen 污染后 32 位溢出回绕
     NSMutableArray *names = [NSMutableArray array];
     for (uint16_t e = 0; e < cdEntries; e++) {
-        if (p + 46 > len) break;
-        if (R32(bytes + p) != kCentralDirSig) break;
-        uint16_t nameLen = R16(bytes + p + 28);
-        uint16_t extraLen = R16(bytes + p + 30);
-        uint16_t commentLen = R16(bytes + p + 32);
-        NSString *n = [[NSString alloc] initWithBytes:(bytes + p + 46) length:nameLen encoding:NSUTF8StringEncoding];
+        if (p + 46 > (uint64_t)len) break;
+        if (R32(bytes + (NSUInteger)p) != kCentralDirSig) break;
+        uint16_t nameLen = R16(bytes + (NSUInteger)p + 28);
+        uint16_t extraLen = R16(bytes + (NSUInteger)p + 30);
+        uint16_t commentLen = R16(bytes + (NSUInteger)p + 32);
+        if (p + 46 + nameLen > (uint64_t)len) break; // 读文件名前边界检查
+        NSString *n = [[NSString alloc] initWithBytes:(bytes + (NSUInteger)p + 46) length:nameLen encoding:NSUTF8StringEncoding];
         if (n) [names addObject:n];
         p += 46 + nameLen + extraLen + commentLen;
     }
@@ -284,6 +318,7 @@ static NSInteger RowNumberFromRef(NSString *ref) {
 
 + (NSDictionary<NSNumber *, NSDictionary<NSNumber *, NSString *> *> *)parseRowsAtPath:(NSString *)path
                                                                                 error:(NSError **)error {
+    @try {
     NSData *zip = [NSData dataWithContentsOfFile:path];
     if (!zip) {
         if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:1 userInfo:@{NSLocalizedDescriptionKey:@"无法读取文件"}];
@@ -331,12 +366,19 @@ static NSInteger RowNumberFromRef(NSString *ref) {
         return nil;
     }
     return shp.rows;
+    } @catch (NSException *e) {
+        // 任何解析异常（损坏文件/越界/畸形 XML）都不允许崩：转 NSError 返回，调用方静默跳过
+        if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:98
+                                            userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"解析异常(%@)", e.name]}];
+        return nil;
+    }
 }
 
 + (NSArray<NSString *> *)columnLinesAtPath:(NSString *)path
                                     column:(NSInteger)col
                                    fromRow:(NSInteger)row
                                      error:(NSError **)error {
+    @try {
     NSDictionary *rows = [self parseRowsAtPath:path error:error];
     if (!rows) return nil;
 
@@ -356,6 +398,11 @@ static NSInteger RowNumberFromRef(NSString *ref) {
     if (lastNonEmpty < 0) return @[];
     NSInteger count = lastNonEmpty - row + 1;
     return [lines subarrayWithRange:NSMakeRange(0, (NSUInteger)count)];
+    } @catch (NSException *e) {
+        if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:98
+                                            userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"解析异常(%@)", e.name]}];
+        return nil;
+    }
 }
 
 + (NSString *)columnLetter:(NSInteger)col {
@@ -371,6 +418,7 @@ static NSInteger RowNumberFromRef(NSString *ref) {
 }
 
 + (NSDictionary<NSNumber *, NSNumber *> *)columnCountsAtPath:(NSString *)path error:(NSError **)error {
+    @try {
     NSDictionary *rows = [self parseRowsAtPath:path error:error];
     if (!rows) return nil;
     // 非空计数：parseRowsAtPath 已 trim，非空才入库（数字/点/符号都算内容；纯空格算空白被剔除）
@@ -386,6 +434,11 @@ static NSInteger RowNumberFromRef(NSString *ref) {
         }
     }
     return counts;
+    } @catch (NSException *e) {
+        if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:98
+                                            userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"解析异常(%@)", e.name]}];
+        return nil;
+    }
 }
 
 @end
