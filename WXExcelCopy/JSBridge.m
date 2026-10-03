@@ -75,21 +75,24 @@ static NSString *const kInjectScript =
 "      var td = head.cells[c];"
 "      td.style.position = 'relative';"
 "      var letter = colLetter(c+1);"
-"      /* 第二行（下，紧贴表格顶）：纯列标 */"
-"      var lab = document.createElement('div');"
-"      lab.style.cssText = 'position:absolute;left:0;right:0;bottom:100%;margin:0;padding:0;text-align:center;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;pointer-events:none;';"
-"      lab.textContent = letter;"
-"      td.appendChild(lab);"
-"      /* 第一行（上）：列标+行数，位于纯列标上方 */"
-"      var cap = document.createElement('div');"
-"      cap.style.cssText = 'position:absolute;left:0;right:0;bottom:100%;margin:0;padding:0;text-align:center;font-size:10px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;pointer-events:none;';"
 "      var n = counts[c+1];"
+"      /* 容器：absolute 贴 td 上方，内部从上到下：3行空位(留给文件名抬头) → A+数量 → A(紧贴表格) */"
+"      var box = document.createElement('div');"
+"      box.style.cssText = 'position:absolute;left:0;right:0;bottom:100%;margin:0;padding:0;';"
+"      var sp = document.createElement('div');"
+"      sp.style.cssText = 'height:42px;margin:0;padding:0;pointer-events:none;';"
+"      box.appendChild(sp);"
+"      var cap = document.createElement('div');"
+"      cap.style.cssText = 'margin:0;padding:0;text-align:center;font-size:10px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;cursor:pointer;';"
 "      cap.textContent = n ? (letter + ' ' + n) : letter;"
-"      td.appendChild(cap);"
-"      var lh = lab.offsetHeight || 14;"
-"      var gap = 3 * lh; /* 微信打开时有文件名抬头遮挡，列标整体下移 3 行高度避开 */"
-"      lab.style.bottom = 'calc(100% + ' + gap + 'px)';"
-"      cap.style.bottom = 'calc(100% + ' + gap + 'px + ' + lh + 'px)';"
+"      box.appendChild(cap);"
+"      var lab = document.createElement('div');"
+"      lab.style.cssText = 'margin:0;padding:0;text-align:center;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;pointer-events:none;';"
+"      lab.textContent = letter;"
+"      box.appendChild(lab);"
+"      td.appendChild(box);"
+"      /* 点击 A+数量 → 复制该列（含表头行）*/"
+"      cap.addEventListener('click',(function(cc){ return function(){ post({type:'colcopy',col:cc}); }; })(c+1));"
 "    }"
 "    document.__wxExcelColHeaderInjected = true;"
 "    return true;"
@@ -99,17 +102,6 @@ static NSString *const kInjectScript =
 "  document.addEventListener('DOMContentLoaded', kick);"
 "  var tries = 0;"
 "  var timer = setInterval(function(){ tries++; if (kick() || tries > 30) clearInterval(timer); }, 200);"
-"  /* ===== 点击单元格复制本列往下（表格结构未动，列号=cellIndex+1）===== */"
-"  document.addEventListener('click',function(e){"
-"    var el=e.target||e.srcElement; if(!el)return;"
-"    if(el.nodeType===3) el=el.parentElement; if(!el)return;"
-"    var td=el.closest?el.closest('td,th'):null;"
-"    if(!td||!td.parentElement) return;"
-"    var tr=td.parentElement;"
-"    var row=tr.rowIndex+1, col=td.cellIndex+1;"
-"    if(row<1||col<1) return;"
-"    post({type:'cell',row:row,col:col});"
-"  },true);"
 "})();";
 
 @implementation JSBridge
@@ -155,8 +147,8 @@ static NSString *const kInjectScript =
     if (pageURL.length == 0) pageURL = message.webView.URL.absoluteString ?: @"";
     NSMutableDictionary *body2 = [body mutableCopy];
     body2[@"url"] = pageURL ?: @"";
-    if ([body2[@"type"] isEqualToString:@"cell"]) {
-        [self handleCell:body2];
+    if ([body2[@"type"] isEqualToString:@"colcopy"]) {
+        [self handleColCopy:body2];
     }
 }
 
@@ -211,13 +203,11 @@ static NSString *const kInjectScript =
     return ordered;
 }
 
-#pragma mark - 点击单元格 → 复制本列往下
+#pragma mark - 点击列标（A+数量）→ 复制整列（含表头行，从第 1 行开始）
 
-- (void)handleCell:(NSDictionary *)body {
-    // row/col 已由 JS 换算为 Excel 1-based（DOM 0-based + 1）
-    NSInteger row = [body[@"row"] integerValue];
+- (void)handleColCopy:(NSDictionary *)body {
     NSInteger col = [body[@"col"] integerValue];
-    if (row < 1 || col < 1) return;
+    if (col < 1) return;
 
     // 后台解析，避免卡微信主线程
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -226,7 +216,7 @@ static NSString *const kInjectScript =
         NSError *lastErr = nil;
         for (NSString *p in ordered) {
             NSError *e = nil;
-            NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:row error:&e];
+            NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 error:&e];
             if (l && !e) { lines = l; break; }
             lastErr = e;
         }
@@ -242,9 +232,9 @@ static NSString *const kInjectScript =
             NSString *joined = [lines componentsJoinedByString:@"\n"];
             [UIPasteboard generalPasteboard].string = joined;
             NSString *letter = [XLSXParser columnLetter:col];
-            NSInteger lastRow = row + (NSInteger)lines.count - 1;
-            [Toast show:[NSString stringWithFormat:@"复制%@%ld-%@%ld共%lu条",
-                         letter, (long)row, letter, (long)lastRow, (unsigned long)lines.count]];
+            NSInteger lastRow = (NSInteger)lines.count;
+            [Toast show:[NSString stringWithFormat:@"复制%@1-%@%ld共%lu条",
+                         letter, letter, (long)lastRow, (unsigned long)lines.count]];
         });
     });
 }
