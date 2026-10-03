@@ -183,7 +183,8 @@ static NSString *const kInjectScript =
         if (![fm fileExistsAtPath:p1 isDirectory:&isDir1] || !isDir1) continue;
         NSArray *sub1names = [fm contentsOfDirectoryAtPath:p1 error:nil];
         for (NSString *odName in sub1names) {
-            if (![odName isEqualToString:@"OpenData"]) continue;
+            // OpenData 大小写不敏感匹配：iOS 枚举返回的实际目录名可能与显示的不完全一致（OpenData/openDATA/opendata 都认）
+            if (![odName.lowercaseString isEqualToString:@"opendata"]) continue;
             NSString *od = [p1 stringByAppendingPathComponent:odName];
             BOOL odDir = NO;
             if (![fm fileExistsAtPath:od isDirectory:&odDir] || !odDir) continue;
