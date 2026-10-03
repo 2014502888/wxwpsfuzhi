@@ -62,7 +62,15 @@ static NSString *const kInjectScript =
 "    if (!table || !table.rows || table.rows.length < 1) return false;"
 "    var head = table.rows[0];"
 "    if (!head.cells || head.cells.length < 1) return false;"
-"    var counts = window.__wxExcelColCounts || {};"
+"    /* 数量=该列非空单元格数，从当前表格 DOM 直接数（跟序列号同源；抬头行除外、空白格不计）*/"
+"    var counts = {};"
+"    for (var r=1;r<table.rows.length;r++){"
+"      var rr = table.rows[r];"
+"      for (var c=0;c<rr.cells.length;c++){"
+"        var tv = rr.cells[c].textContent || '';"
+"        if (tv.replace(/^\\s+|\\s+$/g,'').length > 0) counts[c+1] = (counts[c+1]||0) + 1;"
+"      }"
+"    }"
 "    for (var c=0;c<head.cells.length;c++){"
 "      var td = head.cells[c];"
 "      td.style.position = 'relative';"
@@ -75,31 +83,15 @@ static NSString *const kInjectScript =
 "      /* 第一行（上）：列标+行数，位于纯列标上方 */"
 "      var cap = document.createElement('div');"
 "      cap.style.cssText = 'position:absolute;left:0;right:0;bottom:100%;margin:0;padding:0;text-align:center;font-size:10px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;pointer-events:none;';"
-"      var n = counts[String(c+1)];"
+"      var n = counts[c+1];"
 "      cap.textContent = n ? (letter + ' ' + n) : letter;"
 "      td.appendChild(cap);"
 "      var lh = lab.offsetHeight || 14;"
 "      cap.style.bottom = 'calc(100% + ' + lh + 'px)';"
-"      td.__wxColLetter = letter;"
-"      td.__wxColCap = cap;"
 "    }"
 "    document.__wxExcelColHeaderInjected = true;"
-"    post({type:'colheader'}); /* 通知原生回填行数 */"
 "    return true;"
 "  }"
-"  /* 原生算出行数后回填 */"
-"  window.wxSetColCounts = function(counts){"
-"    if (!counts) return;"
-"    var table = findPreviewTable();"
-"    if (!table || !table.rows || !table.rows[0]) return;"
-"    var head = table.rows[0];"
-"    for (var c=0;c<head.cells.length;c++){"
-"      var td = head.cells[c];"
-"      if (!td || !td.__wxColCap) continue;"
-"      var n = counts[String(c+1)];"
-"      td.__wxColCap.textContent = n ? (td.__wxColLetter + ' ' + n) : td.__wxColLetter;"
-"    }"
-"  };"
 "  function kick(){ var a=injectRowNumbers(); var b=injectColHeader(); return a && b; }"
 "  if (document.readyState === 'interactive' || document.readyState === 'complete') kick();"
 "  document.addEventListener('DOMContentLoaded', kick);"
@@ -163,31 +155,7 @@ static NSString *const kInjectScript =
     body2[@"url"] = pageURL ?: @"";
     if ([body2[@"type"] isEqualToString:@"cell"]) {
         [self handleCell:body2];
-    } else if ([body2[@"type"] isEqualToString:@"colheader"]) {
-        [self handleColHeader:body2 webView:message.webView];
     }
-}
-
-// 列标悬浮已渲染：匹配当前预览文件，解析每列非空行数并回填 JS（列标+行数）
-- (void)handleColHeader:(NSDictionary *)body webView:(WKWebView *)webView {
-    if (!webView) return;
-    NSString *matched = [self matchXlsxForPreviewURL:body[@"url"] ?: @""];
-    if (!matched) return;
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSDictionary *counts = [XLSXParser columnCountsAtPath:matched error:nil];
-        if (!counts) return;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSMutableString *js = [NSMutableString stringWithString:@"window.wxSetColCounts && wxSetColCounts({"];
-            BOOL first = YES;
-            for (NSNumber *c in counts) {
-                if (!first) [js appendString:@","];
-                first = NO;
-                [js appendFormat:@"%ld:%ld", (long)c.integerValue, (long)[counts[c] integerValue]];
-            }
-            [js appendString:@"});"];
-            [webView evaluateJavaScript:js completionHandler:nil];
-        });
-    });
 }
 
 #pragma mark - 补注入（didFinishNavigation 时调用，防 WKUserScript 时序/controller 被替换）
