@@ -166,7 +166,7 @@ static NSString *const kInjectScript =
     });
 }
 
-#pragma mark - xlsx 扫描（精准：微信下载文件固定落在 Documents/<乱码>/openDATA/<乱码>/<xlsx>，只枚举这两层）
+#pragma mark - xlsx 扫描（主路径：Documents/<乱码>/openDATA/<乱码>/<xlsx>；openDATA 为空则回退旧路径兜底）
 
 - (NSArray<NSString *> *)allXlsxSortedByTime {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -174,29 +174,65 @@ static NSString *const kInjectScript =
     NSString *home = NSHomeDirectory();
     NSString *docRoot = [home stringByAppendingPathComponent:@"Documents"];
 
-    // 微信"下载/另存"的 xlsx 固定存于 Documents/<乱码文件夹>/openDATA/<乱码日期文件夹>/<改名xlsx>
-    // 只枚举这两层乱码文件夹，精准定位，不做全沙盒递归
+    // 主路径：微信"下载/另存"的 xlsx 固定存于 Documents/<乱码文件夹>/openDATA/<乱码日期文件夹>/<改名xlsx>
+    // openDATA 大小写不敏感匹配（iOS 可能显示为 openDATA/OpenData 等）
     NSArray *sub1 = [fm contentsOfDirectoryAtPath:docRoot error:nil];
     for (NSString *d1 in sub1) {
         NSString *p1 = [docRoot stringByAppendingPathComponent:d1];
         BOOL isDir1 = NO;
         if (![fm fileExistsAtPath:p1 isDirectory:&isDir1] || !isDir1) continue;
-        NSString *od = [p1 stringByAppendingPathComponent:@"openDATA"];
-        BOOL odDir = NO;
-        if (![fm fileExistsAtPath:od isDirectory:&odDir] || !odDir) continue;
-        NSArray *sub2 = [fm contentsOfDirectoryAtPath:od error:nil];
-        for (NSString *d2 in sub2) {
-            NSString *p2 = [od stringByAppendingPathComponent:d2];
-            BOOL isDir2 = NO;
-            if (![fm fileExistsAtPath:p2 isDirectory:&isDir2] || !isDir2) continue;
-            NSArray *files = [fm contentsOfDirectoryAtPath:p2 error:nil];
-            for (NSString *name in files) {
-                if (![name.pathExtension.lowercaseString isEqualToString:@"xlsx"]) continue;
-                NSString *full = [p2 stringByAppendingPathComponent:name];
-                NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
-                NSDate *mt = attrs[NSFileModificationDate];
-                if (mt) [items addObject:@{@"path": full, @"time": mt}];
+        NSArray *sub1names = [fm contentsOfDirectoryAtPath:p1 error:nil];
+        for (NSString *odName in sub1names) {
+            if (odName.lowercaseString.length != 8) continue;
+            if (![odName.lowercaseString isEqualToString:@"opendata"]) continue;
+            NSString *od = [p1 stringByAppendingPathComponent:odName];
+            BOOL odDir = NO;
+            if (![fm fileExistsAtPath:od isDirectory:&odDir] || !odDir) continue;
+            NSArray *sub2 = [fm contentsOfDirectoryAtPath:od error:nil];
+            for (NSString *d2 in sub2) {
+                NSString *p2 = [od stringByAppendingPathComponent:d2];
+                BOOL isDir2 = NO;
+                if (![fm fileExistsAtPath:p2 isDirectory:&isDir2] || !isDir2) continue;
+                NSArray *files = [fm contentsOfDirectoryAtPath:p2 error:nil];
+                for (NSString *name in files) {
+                    if (![name.pathExtension.lowercaseString isEqualToString:@"xlsx"]) continue;
+                    NSString *full = [p2 stringByAppendingPathComponent:name];
+                    NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
+                    NSDate *mt = attrs[NSFileModificationDate];
+                    if (mt) [items addObject:@{@"path": full, @"time": mt}];
+                }
             }
+        }
+    }
+
+    // 兜底：openDATA 没扫到时，回退 fileCache/www 递归 + Documents 浅层（保证能复制）
+    if (items.count == 0) {
+        NSArray<NSString *> *subs = @[
+            [home stringByAppendingPathComponent:@"tmp/fileCache"],
+            [home stringByAppendingPathComponent:@"tmp/www"],
+        ];
+        for (NSString *root in subs) {
+            NSDirectoryEnumerator *en = [fm enumeratorAtPath:root];
+            NSString *rel;
+            NSUInteger scanned = 0;
+            while ((rel = [en nextObject])) {
+                if (++scanned > 20000) break;
+                NSString *full = [root stringByAppendingPathComponent:rel];
+                if ([full.pathExtension.lowercaseString isEqualToString:@"xlsx"]) {
+                    NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
+                    NSDate *mt = attrs[NSFileModificationDate];
+                    if (mt) [items addObject:@{@"path": full, @"time": mt}];
+                    if (items.count >= 50) break;
+                }
+            }
+        }
+        NSArray *docFiles = [fm contentsOfDirectoryAtPath:docRoot error:nil];
+        for (NSString *name in docFiles) {
+            if (![name.pathExtension.lowercaseString isEqualToString:@"xlsx"]) continue;
+            NSString *full = [docRoot stringByAppendingPathComponent:name];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
+            NSDate *mt = attrs[NSFileModificationDate];
+            if (mt) [items addObject:@{@"path": full, @"time": mt}];
         }
     }
 
