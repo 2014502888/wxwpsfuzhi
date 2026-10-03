@@ -110,11 +110,14 @@ static NSData *ZipEntryData(NSData *zip, NSString *name) {
             uint16_t lNameLen = R16(bytes + (NSUInteger)localOffU + 26);
             uint16_t lExtraLen = R16(bytes + (NSUInteger)localOffU + 28);
             uint64_t dataOff = localOffU + 30 + lNameLen + lExtraLen;
-            // 本地头声明的压缩长度若与中央目录不一致（截断/错位文件）：取较小且落在文件内的值
+            // 本地头声明的压缩长度若与中央目录不一致：0 表示流式写入（真实大小在中央目录/data descriptor），
+            // 直接采用中央目录值；非 0 且更小（截断/错位文件）才取较小且落在文件内的值
             uint32_t lCompSize = R32(bytes + (NSUInteger)localOffU + 18);
             uint64_t remain = (uint64_t)len - (uint64_t)dataOff;
             if (lCompSize != compSize) {
-                if ((uint64_t)lCompSize < compSizeU && (uint64_t)lCompSize <= remain) {
+                if (lCompSize == 0) {
+                    if (compSizeU > remain) return nil;
+                } else if ((uint64_t)lCompSize < compSizeU && (uint64_t)lCompSize <= remain) {
                     compSizeU = lCompSize;
                 } else if (compSizeU > remain) {
                     return nil;
