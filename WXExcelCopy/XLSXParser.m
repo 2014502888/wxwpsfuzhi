@@ -420,28 +420,4 @@ static NSInteger RowNumberFromRef(NSString *ref) {
     return s.length ? s : @"A";
 }
 
-+ (NSDictionary<NSNumber *, NSNumber *> *)columnCountsAtPath:(NSString *)path error:(NSError **)error {
-    @try {
-    NSDictionary *rows = [self parseRowsAtPath:path error:error];
-    if (!rows) return nil;
-    // 非空计数：parseRowsAtPath 已 trim，非空才入库（数字/点/符号都算内容；纯空格算空白被剔除）
-    NSMutableDictionary *counts = [NSMutableDictionary dictionary];
-    for (NSNumber *r in rows) {
-        NSDictionary *rowDict = rows[r];
-        for (NSNumber *c in rowDict) {
-            NSString *v = rowDict[c];
-            if (v.length > 0) {
-                NSNumber *prev = counts[c];
-                counts[c] = @(prev.integerValue + 1);
-            }
-        }
-    }
-    return counts;
-    } @catch (NSException *e) {
-        if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:98
-                                            userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"解析异常(%@)", e.name]}];
-        return nil;
-    }
-}
-
 @end

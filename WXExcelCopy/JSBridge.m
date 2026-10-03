@@ -17,7 +17,7 @@ static NSString *const kInjectScript =
 "  if (document.__wxExcelCopyInjected) return;"
 "  document.__wxExcelCopyInjected = true;"
 "  function post(o){ try{ window.webkit.messageHandlers.wxExcelCopy.postMessage(o); }catch(e){} }"
-"  /* ===== 序列号层：独立悬浮于表格左侧，不插入表格、不参与行列布局 ===== */"
+"  /* ===== 序列号：插进每行首个单元格内 absolute 悬浮在行左侧，行对齐交给浏览器，不占列宽 ===== */"
 "  function findPreviewTable(){"
 "    var tables = document.getElementsByTagName('table');"
 "    for (var i=0;i<tables.length;i++){"
@@ -130,9 +130,9 @@ static NSString *const kInjectScript =
     [webView evaluateJavaScript:kInjectScript completionHandler:nil];
 }
 
-#pragma mark - 当前预览文件匹配（www 副本整体作为前缀，匹配 fileCache 原始文件）
+#pragma mark - 当前预览文件匹配（www 副本整体作为前缀，匹配 OpenData 完整文件）
 
-// 微信预览副本 = 原始文件的前截断，前缀完全一致 → 用副本整体内容匹配原始文件；
+// 微信预览副本 = 原始文件的前截断，前缀完全一致 → 用副本整体内容匹配 OpenData 完整文件；
 // 匹配不到返回 nil（调用方回退到最新文件）
 - (NSString *)matchXlsxForPreviewURL:(NSString *)url {
     NSString *p = url ?: @"";
@@ -218,7 +218,7 @@ static NSString *const kInjectScript =
     NSString *docRoot = [home stringByAppendingPathComponent:@"Documents"];
 
     // 微信"下载/另存"的 xlsx 固定存于 Documents/<乱码文件夹>/OpenData/<乱码日期文件夹>/<改名xlsx>
-    // 只枚举这两层，目录名精确匹配 OpenData（OD 大写、其余小写）
+    // 只枚举这两层，目录名大小写不敏感匹配 OpenData（OpenData/openDATA/opendata 都认）
     NSArray *sub1 = [fm contentsOfDirectoryAtPath:docRoot error:nil];
     for (NSString *d1 in sub1) {
         NSString *p1 = [docRoot stringByAppendingPathComponent:d1];
