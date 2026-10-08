@@ -6,6 +6,7 @@ workflows:
   build-dylib:
     name: Build dylib
     max_build_duration: 10
+    instance_type: mac_mini_m1
     environment:
       xcode: latest
     scripts:
