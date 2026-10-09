@@ -15,6 +15,19 @@ static const char *kBridgeObjKey = "wxExcelCopyBridge";
 static NSString *const kInjectScript =
 @"(function(){"
 "  if (document.__wxExcelCopyInjected) return;"
+"  /* 打开文件诊断（临时）：注入脚本是否运行/在哪层frame/URL/表格情况 —— 定位7月老文件统计行不显示 */"
+"  (function(){"
+"    try{"
+"      if (window.__wxDiagSent) return; window.__wxDiagSent = true;"
+"      var href = (location.href || '').slice(0,40);"
+"      var hasXlsx = (location.href||'').toLowerCase().indexOf('.xlsx') >= 0;"
+"      var tbs = document.getElementsByTagName('table');"
+"      var rows = 0;"
+"      for (var i=0;i<tbs.length;i++){ if (tbs[i].rows) rows += tbs[i].rows.length; }"
+"      var msg = 'INJ-run top:'+(window===window.top)+' xlsx:'+hasXlsx+' ifr:'+(window.frames?window.frames.length:0)+' tbl:'+tbs.length+' rows:'+rows+' URL:'+href;"
+"      window.webkit.messageHandlers.wxExcelCopy.postMessage({type:'diag', msg:msg});"
+"    }catch(e){}"
+"  })();"
 "  /* URL校验只对主frame生效（避免误入微信搜一搜等网页表格）；iframe内跳过——多sheet文件表格在x-apple-ql-id:// iframe里，其URL不含.xlsx */"
 "  if (window === window.top) {"
 "    var href = (location.href || '').toLowerCase();"
@@ -174,6 +187,11 @@ static NSString *const kInjectScript =
     if (pageURL.length == 0) pageURL = message.webView.URL.absoluteString ?: @"";
     NSMutableDictionary *body2 = [body mutableCopy];
     body2[@"url"] = pageURL ?: @"";
+    if ([body2[@"type"] isEqualToString:@"diag"]) {
+        // 打开文件注入诊断（临时）：Toast 显示注入状态，定位老文件统计行不显示
+        [Toast show:body2[@"msg"] ?: @"diag"];
+        return;
+    }
     if ([body2[@"type"] isEqualToString:@"colcopy"]) {
         [self handleColCopy:body2];
     }
