@@ -236,17 +236,23 @@ static NSString *const kInjectScript =
     // 后台解析，避免卡微信主线程
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSArray<NSString *> *ordered = [self orderedCandidates:body[@"url"] ?: @""];
+        NSMutableString *diag = [NSMutableString stringWithFormat:@"复制诊断 col=%ld header=%lu格", (long)col, (unsigned long)domHeader.count];
+        [diag appendFormat:@" 沙盒%lu个:", (unsigned long)ordered.count];
+        for (NSString *p in ordered) [diag appendFormat:@" %@", p.lastPathComponent];
         NSArray<NSString *> *lines = nil;
-        NSError *lastErr = nil;
+        NSInteger usedFile = -1, usedSheet = 1;
         // 第一遍：优先按表头匹配文件+sheet（修复多文件/多sheet取错；表头不一致的文件跳过）
         if (domHeader.count > 0) {
             for (NSString *p in ordered) {
                 NSInteger sidx = [self matchedSheetIndexForHeader:domHeader file:p];
-                if (sidx <= 0) continue;
-                NSError *e = nil;
-                NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:sidx error:&e];
-                if (l && !e) { lines = l; break; }
-                lastErr = e;
+                if (sidx > 0) {
+                    [diag appendFormat:@" | %@→sheet%ld匹配✓", p.lastPathComponent, (long)sidx];
+                    NSError *e = nil;
+                    NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:sidx error:&e];
+                    if (l && !e) { lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = sidx; break; }
+                } else {
+                    [diag appendFormat:@" | %@✗%@", p.lastPathComponent, [self headerMismatchInfo:domHeader file:p]];
+                }
             }
         }
         // 第二遍：匹配不到（预览文件未另存进沙盒/表头差异）→ 回退第一个能解析的文件(sheet1)，保证功能可用
@@ -254,27 +260,46 @@ static NSString *const kInjectScript =
             for (NSString *p in ordered) {
                 NSError *e = nil;
                 NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:1 error:&e];
-                if (l && !e) { lines = l; break; }
-                lastErr = e;
+                if (l && !e) { lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = 1; break; }
             }
         }
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (!lines || lastErr) {
-                [Toast show:@"未找到可用文件"];
+            if (!lines) {
+                [diag appendString:@" → 复制失败"];
+                [Toast show:diag];
                 return;
             }
             if (lines.count == 0) {
-                [Toast show:@"该列无数据"];
+                [diag appendString:@" → 该列无数据"];
+                [Toast show:diag];
                 return;
             }
             NSString *joined = [lines componentsJoinedByString:@"\n"];
             [UIPasteboard generalPasteboard].string = joined;
             NSString *letter = [XLSXParser columnLetter:col];
             NSInteger lastRow = (NSInteger)lines.count;
-            [Toast show:[NSString stringWithFormat:@"复制%@1-%@%ld共%lu条",
-                         letter, letter, (long)lastRow, (unsigned long)lines.count]];
+            [diag appendFormat:@" → %@ sheet%ld 复制%@1-%@%ld共%lu条",
+             (usedFile >= 0 ? ordered[(NSUInteger)usedFile].lastPathComponent : @"?"), (long)usedSheet,
+             letter, letter, (long)lastRow, (unsigned long)lines.count];
+            [Toast show:diag];
         });
     });
+}
+
+// 诊断用：DOM 表头 vs 文件 sheet1 表头 前5格对比（定位匹配失败原因）
+- (NSString *)headerMismatchInfo:(NSArray<NSString *> *)domHeader file:(NSString *)path {
+    NSError *e = nil;
+    NSDictionary *rows = [XLSXParser parseSheetAtPath:path sheetIndex:1 error:&e];
+    if (!rows) return [NSString stringWithFormat:@"解析失败(%ld)", (long)e.code];
+    NSDictionary *h = rows[@(1)];
+    NSMutableString *s = [NSMutableString stringWithString:@"表头"];
+    for (NSInteger i = 0; i < domHeader.count && i < 5; i++) {
+        NSString *d = domHeader[i];
+        NSString *f = [(h[@(i + 1)] ?: @"") stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (d.length == 0 && f.length == 0) continue;
+        [s appendFormat:@"[%ld]%@vs%@;", (long)(i + 1), (d.length > 4 ? [d substringToIndex:4] : d), (f.length > 4 ? [f substringToIndex:4] : f)];
+    }
+    return s;
 }
 
 #pragma mark - 多 sheet 匹配（复制时按当前预览 sheet 取数）
