@@ -276,7 +276,7 @@ static NSString *const kInjectScript =
 // 拆 JS 表头指纹：SOH 分隔 → 各格文本（去首尾空白，去掉末尾空串）
 - (NSArray<NSString *> *)splitHeaderSig:(NSString *)sig {
     if (!sig || sig.length == 0) return @[];
-    NSArray<NSString *> *parts = [sig componentsSeparatedByString:@"\u0001"];
+    NSArray<NSString *> *parts = [sig componentsSeparatedByString:@"\x01"];
     NSMutableArray<NSString *> *out = [NSMutableArray array];
     for (NSString *s in parts) {
         NSString *t = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
