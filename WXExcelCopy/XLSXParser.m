@@ -173,6 +173,8 @@ static NSInteger RowNumberFromRef(NSString *ref) {
 @property (nonatomic, strong) NSMutableArray<NSString *> *sharedStrings;
 @property (nonatomic) BOOL sharedMode;
 @property (nonatomic) NSInteger maxRows; // 0=不限；>0 只解析前 maxRows 个非空行（轻量匹配用）
+@property (nonatomic) BOOL countMode; // 统计模式：只数每列非空单元格，不驻留行数据（大文件统计用）
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *colCounts;
 
 // 状态机
 @property (nonatomic, strong) NSString *curCellRef;
@@ -194,6 +196,7 @@ static NSInteger RowNumberFromRef(NSString *ref) {
         _rows = [NSMutableDictionary dictionary];
         _sharedStrings = [NSMutableArray array];
         _curText = [NSMutableString string];
+        _colCounts = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -276,6 +279,14 @@ static NSInteger RowNumberFromRef(NSString *ref) {
         NSInteger colNum = ColumnNumberFromRef(self.curCellRef);
         if (rowNum <= 0 || colNum <= 0) {
             self.curCellRef = nil;
+            return;
+        }
+        // 统计模式：只数每列非空单元格（含表头行），不驻留数据
+        if (self.countMode) {
+            NSNumber *c = self.colCounts[@(colNum)];
+            self.colCounts[@(colNum)] = @((c ? c.integerValue : 0) + 1);
+            self.curCellRef = nil;
+            self.curCellType = nil;
             return;
         }
         NSMutableDictionary<NSNumber *, NSString *> *rowDict = self.rows[@(rowNum)];
@@ -399,6 +410,68 @@ static NSInteger RowNumberFromRef(NSString *ref) {
 + (NSDictionary<NSNumber *, NSDictionary<NSNumber *, NSString *> *> *)parseRowsAtPath:(NSString *)path
                                                                                 error:(NSError **)error {
     return [self parseSheetAtPath:path sheetIndex:1 error:error];
+}
+
++ (NSArray<NSNumber *> *)countColumnsAtPath:(NSString *)path
+                                 sheetIndex:(NSInteger)sheetIndex
+                                      error:(NSError **)error {
+    @try {
+    if (sheetIndex < 1) sheetIndex = 1;
+    NSData *zip = [NSData dataWithContentsOfFile:path];
+    if (!zip) {
+        if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:1 userInfo:@{NSLocalizedDescriptionKey:@"无法读取文件"}];
+        return nil;
+    }
+    NSString *sheetName = [NSString stringWithFormat:@"xl/worksheets/sheet%ld.xml", (long)sheetIndex];
+    NSData *sheetXml = ZipEntryData(zip, sheetName);
+    if (!sheetXml && sheetIndex == 1) {
+        NSArray *entries = [self zipEntriesAtPath:path error:nil];
+        for (NSString *e in entries) {
+            NSString *low = e.lowercaseString;
+            if ([low hasSuffix:@".xml"] &&
+                ([low containsString:@"sheet"] || [low containsString:@"worksheet"])) {
+                sheetXml = ZipEntryData(zip, e);
+                if (sheetXml) break;
+            }
+        }
+    }
+    if (!sheetXml) {
+        if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:2
+                                            userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"未找到 sheet%ld.xml", (long)sheetIndex]}];
+        return nil;
+    }
+    NSData *ssXml = ZipEntryData(zip, @"xl/sharedStrings.xml");
+    NSMutableArray<NSString *> *shared = [NSMutableArray array];
+    if (ssXml) {
+        WXXMLParser *sp = [[WXXMLParser alloc] initWithSharedMode:YES];
+        NSXMLParser *xp = [[NSXMLParser alloc] initWithData:ssXml];
+        xp.delegate = sp;
+        [xp parse];
+        shared = sp.sharedStrings;
+    }
+    WXXMLParser *shp = [[WXXMLParser alloc] initWithSharedMode:NO];
+    shp.sharedStrings = shared;
+    shp.countMode = YES; // 只数非空单元格，不驻留数据（大文件安全）
+    NSXMLParser *xp2 = [[NSXMLParser alloc] initWithData:sheetXml];
+    xp2.delegate = shp;
+    [xp2 parse];
+    if (shp.colCounts.count == 0) {
+        if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:3 userInfo:@{NSLocalizedDescriptionKey:@"表格无数据"}];
+        return nil;
+    }
+    // 按列号排序输出（1-based）
+    NSInteger maxCol = 0;
+    for (NSNumber *k in shp.colCounts.allKeys) if (k.integerValue > maxCol) maxCol = k.integerValue;
+    NSMutableArray<NSNumber *> *outArr = [NSMutableArray arrayWithCapacity:(NSUInteger)maxCol];
+    for (NSInteger c = 1; c <= maxCol; c++) {
+        [outArr addObject:shp.colCounts[@(c)] ?: @0];
+    }
+    return outArr;
+    } @catch (NSException *e) {
+        if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:98
+                                            userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"解析异常(%@)", e.name]}];
+        return nil;
+    }
 }
 
 + (NSArray<NSString *> *)columnLinesAtPath:(NSString *)path

@@ -30,6 +30,12 @@
                                 sheetIndex:(NSInteger)sheetIndex
                                      error:(NSError **)error;
 
+// 统计每列非空单元格数（1-based 列号 → NSNumber；含表头行），流式解析不驻留数据，
+// 大文件（数万行/几十MB）也能安全统计
++ (NSArray<NSNumber *> *)countColumnsAtPath:(NSString *)path
+                                 sheetIndex:(NSInteger)sheetIndex
+                                      error:(NSError **)error;
+
 // 列号 → 字母（1→A, 27→AA）
 + (NSString *)columnLetter:(NSInteger)col;
 

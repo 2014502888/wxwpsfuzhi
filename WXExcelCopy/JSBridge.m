@@ -89,9 +89,9 @@ static NSString *const kInjectScript =
 "      var c0 = table.rows[di].cells[0];"
 "      dataSig += (c0 ? c0.textContent : '').replace(/^\\s+|\\s+$/g,'') + '\\u0001';"
 "    }"
-"    /* 数量=该列非空单元格数，从当前表格 DOM 直接数（抬头行除外、空白格不计）*/"
+"    /* 数量=该列非空单元格数，从当前表格 DOM 直接数（抬头行也计入，与复制口径一致；空白格不计）*/"
 "    var counts = {};"
-"    for (var r=1;r<table.rows.length;r++){"
+"    for (var r=0;r<table.rows.length;r++){"
 "      var rr = table.rows[r];"
 "      for (var c=0;c<rr.cells.length;c++){"
 "        var tv = rr.cells[c].textContent || '';"
@@ -131,11 +131,11 @@ static NSString *const kInjectScript =
 "      l3.textContent = hText.length > 4 ? (hText.slice(0,4) + '…') : hText;"
 "      item.appendChild(l3);"
 "      (function(cc, hs, ds, tb){ item.addEventListener('click', function(){"
-"        /* DOM直取：直接从预览表格读该列全部非空值（跳过表头行），所见即所得，.xls/.xlsx通吃、不依赖文件匹配 */"
+"        /* DOM直取：从预览表格读该列全部非空值（含表头行 r=0，与统计口径一致）*/"
 "        var dv = [];"
 "        try{"
 "          var rows = tb.rows;"
-"          for (var r=1;r<rows.length;r++){"
+"          for (var r=0;r<rows.length;r++){"
 "            var cells = rows[r].cells;"
 "            if (cc-1 < cells.length){"
 "              var v = (cells[cc-1].textContent || '').replace(/^\\s+|\\s+$/g,'');"
@@ -143,12 +143,29 @@ static NSString *const kInjectScript =
 "            }"
 "          }"
 "        }catch(e){}"
-"        post({type:'colcopy',col:cc,header:hs,df:ds,domVals:dv});"
+"        post({type:'colcopy',col:cc,header:hs,df:ds,domVals:dv,tableRows:tb.rows.length});"
 "      }); })(c+1, headSig, dataSig, table);"
 "      bar.appendChild(item);"
 "    }"
 "    anchor.appendChild(bar);"
 "    document.__wxExcelColHeaderInjected = true;"
+"    /* 大文件统计修正：预览只渲染前~4096行（渲染上限），DOM计数会少——发stat请求让原生读文件统计每列真实数量后回填 */"
+"    if (table.rows.length >= 4000){"
+"      window.__wxUpdateCounts = function(arr){"
+"        try{"
+"          if (!arr || !arr.length) return;"
+"          var items = document.querySelectorAll('#__wxExcelBar > div');"
+"          for (var i=0;i<items.length;i++){"
+"            var cc = i+1;"
+"            if (cc-1 < arr.length && arr[cc-1] != null){"
+"              var l2 = items[i].querySelectorAll('div')[1];"
+"              if (l2) l2.textContent = String(arr[cc-1]);"
+"            }"
+"          }"
+"        }catch(e){}"
+"      };"
+"      post({type:'stat', header:headSig, df:dataSig});"
+"    }"
 "    return true;"
 "  }"
 "  function kick(){ return injectColHeader(); }"
@@ -206,9 +223,62 @@ static NSString *const kInjectScript =
         [Toast show:body2[@"msg"] ?: @"diag"];
         return;
     }
+    if ([body2[@"type"] isEqualToString:@"stat"]) {
+        // 大文件统计修正：读文件统计每列真实数量（预览渲染截断时 DOM 计数不全），回填统计栏
+        [self handleStat:body2 webView:message.webView];
+        return;
+    }
     if ([body2[@"type"] isEqualToString:@"colcopy"]) {
         [self handleColCopy:body2];
     }
+}
+
+// 大文件（预览只渲染前~4096行）统计修正：匹配文件→流式统计每列非空数（含表头）→回传JS更新统计栏
+- (void)handleStat:(NSDictionary *)body webView:(WKWebView *)wv {
+    if (!wv) return;
+    NSArray<NSString *> *domHeader = [self splitHeaderSig:body[@"header"]];
+    NSArray<NSString *> *domData = [self splitHeaderSig:body[@"df"]];
+    NSString *fp = [NSString stringWithFormat:@"%@%@", (body[@"header"] ?: @""), (body[@"df"] ?: @"")];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSArray<NSString *> *ordered = [self orderedCandidates:body[@"url"] ?: @""];
+        NSString *path = nil;
+        NSInteger sidx = 1;
+        // 1) 缓存命中
+        NSDictionary *cached = [self cachedMatchForFingerprint:fp];
+        if (cached) {
+            NSString *cp = cached[@"path"];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:cp]) {
+                path = cp; sidx = [cached[@"sheet"] integerValue];
+            }
+        }
+        // 2) 精确：表头+A列前3行
+        if (!path && domHeader.count > 0 && domData.count > 0) {
+            for (NSString *p in ordered) {
+                NSInteger s = [self matchedSheetIndexForHeader:domHeader data:domData col:1 file:p];
+                if (s > 0) { path = p; sidx = s; [self cacheMatchFingerprint:fp path:p sheet:s]; break; }
+            }
+        }
+        // 3) 表头匹配
+        if (!path && domHeader.count > 0) {
+            for (NSString *p in ordered) {
+                NSInteger s = [self matchedSheetIndexForHeader:domHeader file:p];
+                if (s > 0) { path = p; sidx = s; break; }
+            }
+        }
+        // 4) 兜底最新
+        if (!path && ordered.count > 0) { path = ordered[0]; sidx = 1; }
+        if (!path) return;
+        NSError *e = nil;
+        NSArray<NSNumber *> *counts = [XLSXParser countColumnsAtPath:path sheetIndex:sidx error:&e];
+        if (!counts || counts.count == 0) return;
+        NSData *jsData = [NSJSONSerialization dataWithJSONObject:counts options:0 error:nil];
+        if (!jsData) return;
+        NSString *jsArr = [[NSString alloc] initWithData:jsData encoding:NSUTF8StringEncoding];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [wv evaluateJavaScript:[NSString stringWithFormat:@"window.__wxUpdateCounts && window.__wxUpdateCounts(%@);", jsArr]
+                 completionHandler:nil];
+        });
+    });
 }
 
 #pragma mark - 补注入（didFinishNavigation 时调用，防 WKUserScript 时序/controller 被替换）
@@ -268,25 +338,29 @@ static NSString *const kInjectScript =
     NSInteger col = [body[@"col"] integerValue];
     if (col < 1) return;
 
-    // DOM 直取优先：JS 已从预览表格读出该列全部非空值（跳过表头），所见即所得——
-    // .xls/.xlsx 通吃、不依赖文件匹配（613 这类取错文件问题彻底消失）
-    NSArray *domVals = body[@"domVals"];
-    if ([domVals isKindOfClass:[NSArray class]] && domVals.count >= 2) {
-        NSMutableArray *clean = [NSMutableArray array];
-        for (id v in domVals) {
-            if ([v isKindOfClass:[NSString class]]) {
-                NSString *s = [v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                if (s.length > 0) [clean addObject:s];
+    // 表格 DOM 行数：小文件(<4000行)微信完整渲染→DOM直取（所见即所得，.xls/.xlsx通吃）；
+    // 大文件(>=4000行)预览只渲染前~4096行(渲染上限)，DOM 不全→必须走文件解析拿完整数据
+    NSInteger tableRows = [body[@"tableRows"] integerValue];
+    if (tableRows < 4000) {
+        // DOM 直取：JS 已从预览表格读出该列全部非空值（含表头行 r=0），不依赖文件匹配
+        NSArray *domVals = body[@"domVals"];
+        if ([domVals isKindOfClass:[NSArray class]] && domVals.count >= 2) {
+            NSMutableArray *clean = [NSMutableArray array];
+            for (id v in domVals) {
+                if ([v isKindOfClass:[NSString class]]) {
+                    NSString *s = [v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    if (s.length > 0) [clean addObject:s];
+                }
             }
-        }
-        if (clean.count >= 2) {
-            [UIPasteboard generalPasteboard].string = [clean componentsJoinedByString:@"\n"];
-            [Toast show:[NSString stringWithFormat:@"✓ 预览复制 %lu 条", (unsigned long)clean.count]];
-            return;
+            if (clean.count >= 2) {
+                [UIPasteboard generalPasteboard].string = [clean componentsJoinedByString:@"\n"];
+                [Toast show:[NSString stringWithFormat:@"✓ 预览复制 %lu 条(含表头)", (unsigned long)clean.count]];
+                return;
+            }
         }
     }
 
-    // 兜底：文件解析（缓存→精确→表头→回退）——DOM 未取到/取不全时用
+    // 文件解析（缓存→精确→表头→回退）——大文件必须走这里拿完整数据；小文件 DOM 未取到/取不全时也兜底
     // DOM 表头指纹（JS 以 SOH 分隔各格文本），用于匹配当前激活 sheet
     NSArray<NSString *> *domHeader = [self splitHeaderSig:body[@"header"]];
     // DOM 数据指纹（A列前3行，SOH 分隔）：微信下载后文件名变数字，靠数据识别预览对应的下载文件
