@@ -70,6 +70,12 @@ static NSString *const kInjectScript =
 "    for (var hc=0;hc<head.cells.length;hc++){"
 "      headSig += (head.cells[hc].textContent || '').replace(/^\\s+|\\s+$/g,'') + '\\u0001';"
 "    }"
+"    /* 数据指纹：A列前3行数据值(SOH分隔)，原生据此区分同表头的不同文件(微信下载后文件名变数字,只能靠数据识别) */"
+"    var dataSig = '';"
+"    for (var di=1; di<=3 && di<table.rows.length; di++){"
+"      var c0 = table.rows[di].cells[0];"
+"      dataSig += (c0 ? c0.textContent : '').replace(/^\\s+|\\s+$/g,'') + '\\u0001';"
+"    }"
 "    /* 数量=该列非空单元格数，从当前表格 DOM 直接数（抬头行除外、空白格不计）*/"
 "    var counts = {};"
 "    for (var r=1;r<table.rows.length;r++){"
@@ -111,7 +117,7 @@ static NSString *const kInjectScript =
 "      l3.style.cssText = 'font-size:10px;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';"
 "      l3.textContent = hText.length > 4 ? (hText.slice(0,4) + '…') : hText;"
 "      item.appendChild(l3);"
-"      (function(cc, hs){ item.addEventListener('click', function(){ post({type:'colcopy',col:cc,header:hs}); }); })(c+1, headSig);"
+"      (function(cc, hs, ds){ item.addEventListener('click', function(){ post({type:'colcopy',col:cc,header:hs,df:ds}); }); })(c+1, headSig, dataSig);"
 "      bar.appendChild(item);"
 "    }"
 "    anchor.appendChild(bar);"
@@ -232,6 +238,8 @@ static NSString *const kInjectScript =
 
     // DOM 表头指纹（JS 以 SOH 分隔各格文本），用于匹配当前激活 sheet
     NSArray<NSString *> *domHeader = [self splitHeaderSig:body[@"header"]];
+    // DOM 数据指纹（A列前3行，SOH 分隔）：微信下载后文件名变数字，靠数据识别预览对应的下载文件
+    NSArray<NSString *> *domData = [self splitHeaderSig:body[@"df"]];
 
     // 后台解析，避免卡微信主线程
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -245,25 +253,40 @@ static NSString *const kInjectScript =
         NSArray<NSString *> *lines = nil;
         NSInteger usedFile = -1, usedSheet = 1;
         NSInteger shownMismatch = 0;
-        // 第一遍：优先按表头匹配文件+sheet（修复多文件/多sheet取错；表头不一致的文件跳过）
-        if (domHeader.count > 0) {
+        // 第一遍：表头+A列前3行数据 都匹配 → 精确命中预览对应文件（同表头不同数据的文件跳过）
+        if (domHeader.count > 0 && domData.count > 0) {
             for (NSString *p in recent) {
-                NSInteger sidx = [self matchedSheetIndexForHeader:domHeader file:p];
+                NSInteger sidx = [self matchedSheetIndexForHeader:domHeader data:domData col:1 file:p];
                 if (sidx > 0) {
-                    [diag appendFormat:@" | %@✓sheet%ld", p.lastPathComponent, (long)sidx];
+                    [diag appendFormat:@" | %@✓精确sheet%ld", p.lastPathComponent, (long)sidx];
                     NSError *e = nil;
                     NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:sidx error:&e];
                     if (l && !e) { lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = sidx; break; }
-                } else if (shownMismatch < 5) {
+                } else if (shownMismatch < 3) {
                     [diag appendFormat:@" | %@✗%@", p.lastPathComponent, [self headerMismatchInfo:domHeader file:p]];
                     shownMismatch++;
                 }
             }
-            if (!lines && shownMismatch >= 5 && recent.count > 5) {
+        }
+        // 第二遍：仅表头匹配（无数据指纹或精确未中时，表头一致的文件也能用——比回退更接近预览内容）
+        if (!lines && domHeader.count > 0) {
+            for (NSString *p in recent) {
+                NSInteger sidx = [self matchedSheetIndexForHeader:domHeader file:p];
+                if (sidx > 0) {
+                    [diag appendFormat:@" | %@✓表头sheet%ld", p.lastPathComponent, (long)sidx];
+                    NSError *e = nil;
+                    NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:sidx error:&e];
+                    if (l && !e) { lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = sidx; break; }
+                } else if (shownMismatch < 3) {
+                    [diag appendFormat:@" | %@✗%@", p.lastPathComponent, [self headerMismatchInfo:domHeader file:p]];
+                    shownMismatch++;
+                }
+            }
+            if (!lines && shownMismatch >= 3 && recent.count > 3) {
                 [diag appendFormat:@" | ...其余%lu个✗", (unsigned long)(recent.count - shownMismatch)];
             }
         }
-        // 第二遍：匹配不到（预览文件未另存进沙盒/表头差异）→ 回退最近里第一个能解析的文件(sheet1)，保证功能可用
+        // 第三遍：匹配不到（预览文件未另存进沙盒/表头差异）→ 回退最近里第一个能解析的文件(sheet1)，保证功能可用
         if (!lines) {
             for (NSString *p in recent) {
                 NSError *e = nil;
@@ -339,6 +362,35 @@ static NSString *const kInjectScript =
         if (h && [self headerMatches:domHeader sheetRow:h]) return idx;
     }
     return 0;
+}
+
+// 表头 + 数据指纹（指定列前N行）都匹配 → 精确命中；找不到返回 0
+- (NSInteger)matchedSheetIndexForHeader:(NSArray<NSString *> *)domHeader data:(NSArray<NSString *> *)domData col:(NSInteger)col file:(NSString *)path {
+    for (NSInteger idx = 1; idx <= 64; idx++) {
+        NSError *e = nil;
+        NSDictionary *rows = [XLSXParser parseSheetAtPath:path sheetIndex:idx error:&e];
+        if (!rows) {
+            if (e && e.code == 2) break;
+            continue;
+        }
+        NSDictionary *h = rows[@(1)];
+        if (!h || ![self headerMatches:domHeader sheetRow:h]) continue;
+        if ([self dataMatches:domData col:col rows:rows]) return idx;
+    }
+    return 0;
+}
+
+// DOM 数据指纹（A列前N行）与文件同列前N行（表头下第1行起）逐行一致 → 匹配
+- (BOOL)dataMatches:(NSArray<NSString *> *)domData col:(NSInteger)col rows:(NSDictionary *)rows {
+    NSInteger nonEmpty = 0, matched = 0;
+    for (NSInteger i = 0; i < domData.count; i++) {
+        NSString *d = domData[i];
+        if (d.length == 0) continue;
+        nonEmpty++;
+        NSString *v = [rows[@(i + 2)][@(col)] ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([d isEqualToString:v]) matched++;
+    }
+    return nonEmpty > 0 && matched == nonEmpty;
 }
 
 // DOM 表头非空格全部与文件表头同位置文本一致 → 匹配
