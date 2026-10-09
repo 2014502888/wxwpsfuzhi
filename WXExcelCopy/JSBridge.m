@@ -240,7 +240,13 @@ static NSString *const kInjectScript =
         NSError *lastErr = nil;
         for (NSString *p in ordered) {
             NSInteger sidx = (domHeader.count > 0) ? [self matchedSheetIndexForHeader:domHeader file:p] : 0;
-            NSInteger useIdx = (sidx > 0) ? sidx : 1; // 匹配不到回退第一个 sheet
+            if (domHeader.count > 0 && sidx == 0) {
+                // 该文件表头与屏幕不一致（沙盒里可能有多个 xlsx，预览URL是x-apple-ql-id://拿不到路径）→ 跳过，继续找匹配的文件
+                lastErr = [NSError errorWithDomain:@"WXExcelCopy" code:99
+                                          userInfo:@{NSLocalizedDescriptionKey:@"表头不匹配"}];
+                continue;
+            }
+            NSInteger useIdx = (sidx > 0) ? sidx : 1; // 无表头指纹或匹配不到 sheet 时回退第一个 sheet
             NSError *e = nil;
             NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:useIdx error:&e];
             if (l && !e) { lines = l; break; }
@@ -248,7 +254,7 @@ static NSString *const kInjectScript =
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!lines || lastErr) {
-                [Toast show:@"未找到可用文件"];
+                [Toast show:([body[@"header"] length] > 0 ? @"未找到匹配的表格" : @"未找到可用文件")];
                 return;
             }
             if (lines.count == 0) {
