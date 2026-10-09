@@ -15,20 +15,7 @@ static const char *kBridgeObjKey = "wxExcelCopyBridge";
 static NSString *const kInjectScript =
 @"(function(){"
 "  if (document.__wxExcelCopyInjected) return;"
-"  /* 打开文件诊断（临时）：注入脚本是否运行/在哪层frame/URL/表格情况 —— 定位7月老文件统计行不显示 */"
-"  (function(){"
-"    try{"
-"      if (window.__wxDiagSent) return; window.__wxDiagSent = true;"
-"      var href = (location.href || '').slice(0,40);"
-"      var hasXlsx = (location.href||'').toLowerCase().indexOf('.xlsx') >= 0;"
-"      var tbs = document.getElementsByTagName('table');"
-"      var rows = 0;"
-"      for (var i=0;i<tbs.length;i++){ if (tbs[i].rows) rows += tbs[i].rows.length; }"
-"      var msg = 'INJ-run top:'+(window===window.top)+' xlsx:'+hasXlsx+' ifr:'+(window.frames?window.frames.length:0)+' tbl:'+tbs.length+' rows:'+rows+' URL:'+href;"
-"      window.webkit.messageHandlers.wxExcelCopy.postMessage({type:'diag', msg:msg});"
-"    }catch(e){}"
-"  })();"
-"  /* URL校验只对主frame生效（避免误入微信搜一搜等网页表格）；iframe内跳过——多sheet文件表格在x-apple-ql-id:// iframe里，其URL不含.xlsx */"
+"  /* URL校验只对主frame生效（避免误入微信搜一搜等网页表格）；iframe内跳过——多sheet文件表格在x-apple-ql-id:// iframe里，其URL不含.xlsx/.xls */"
 "  if (window === window.top) {"
 "    var href = (location.href || '').toLowerCase();"
 "    if (href.indexOf('.xlsx') < 0 && href.indexOf('.xls') < 0) return;"
@@ -218,11 +205,6 @@ static NSString *const kInjectScript =
     if (pageURL.length == 0) pageURL = message.webView.URL.absoluteString ?: @"";
     NSMutableDictionary *body2 = [body mutableCopy];
     body2[@"url"] = pageURL ?: @"";
-    if ([body2[@"type"] isEqualToString:@"diag"]) {
-        // 打开文件注入诊断（临时）：Toast 显示注入状态，定位老文件统计行不显示
-        [Toast show:body2[@"msg"] ?: @"diag"];
-        return;
-    }
     if ([body2[@"type"] isEqualToString:@"stat"]) {
         // 大文件统计修正：读文件统计每列真实数量（预览渲染截断时 DOM 计数不全），回填统计栏
         [self handleStat:body2 webView:message.webView];
@@ -371,16 +353,8 @@ static NSString *const kInjectScript =
     // 后台解析，避免卡微信主线程
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSArray<NSString *> *ordered = [self orderedCandidates:body[@"url"] ?: @""];
-        // 匹配只查最近 30 个（微信刚预览的文件几乎必在最近打开列表；1777个全遍历太慢）
-        NSUInteger limit = MIN(30u, ordered.count);
-        NSArray<NSString *> *recent = [ordered subarrayWithRange:NSMakeRange(0, limit)];
-        NSMutableString *diag = [NSMutableString stringWithFormat:@"复制诊断 col=%ld header=%lu格 沙盒%lu个(查最近%lu):", (long)col, (unsigned long)domHeader.count, (unsigned long)ordered.count, (unsigned long)recent.count];
-        for (NSUInteger i = 0; i < recent.count && i < 3; i++) [diag appendFormat:@" %@", recent[i].lastPathComponent];
-        if (recent.count > 3) [diag appendFormat:@" ...等%lu个", (unsigned long)(recent.count - 3)];
         NSArray<NSString *> *lines = nil;
         NSInteger usedFile = -1, usedSheet = 1;
-        NSInteger shownMismatch = 0;
-        NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
         // 第零遍：缓存命中（数据指纹→文件路径+sheet，命中直接解析这一个文件，不搜库；文件被删自动失效）
         NSDictionary *cached = [self cachedMatchForFingerprint:fp];
         if (cached) {
@@ -391,11 +365,10 @@ static NSString *const kInjectScript =
             if (l && !e) {
                 NSInteger idx = (NSInteger)[ordered indexOfObject:path];
                 lines = l; usedFile = (idx == NSNotFound ? -1 : idx); usedSheet = sidx;
-                [diag appendFormat:@" | 缓存%@ sheet%ld", path.lastPathComponent, (long)sidx];
             }
         }
         // 第一遍：表头+A列前3行数据 都匹配 → 精确命中预览对应文件（同表头不同数据的文件跳过）。
-        // 搜全部1777个（轻量解析只读前4行，快）；最近30里没有下载版时也能命中
+        // 搜全部（轻量解析只读前4行，快）；最近30里没有下载版时也能命中
         if (!lines && domHeader.count > 0 && domData.count > 0) {
             for (NSString *p in ordered) {
                 NSInteger sidx = [self matchedSheetIndexForHeader:domHeader data:domData col:1 file:p];
@@ -404,83 +377,52 @@ static NSString *const kInjectScript =
                     NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:sidx error:&e];
                     if (l && !e) {
                         lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = sidx;
-                        [diag appendFormat:@" | %@✓精确sheet%ld", p.lastPathComponent, (long)sidx];
                         [self cacheMatchFingerprint:fp path:p sheet:sidx];
                         break;
                     }
-                } else if (shownMismatch < 2) {
-                    [diag appendFormat:@" | %@✗%@", p.lastPathComponent, [self headerMismatchInfo:domHeader file:p]];
-                    shownMismatch++;
                 }
             }
-            if (!lines) [diag appendFormat:@" | 精确搜%lu个全✗", (unsigned long)ordered.count];
         }
         // 第二遍：仅表头匹配（无数据指纹或精确未中时，表头一致的文件也能用——比回退更接近预览内容）
         if (!lines && domHeader.count > 0) {
-            NSArray<NSString *> *recent2 = (recent.count > 0 ? recent : ordered);
-            for (NSString *p in recent2) {
+            for (NSString *p in ordered) {
                 NSInteger sidx = [self matchedSheetIndexForHeader:domHeader file:p];
                 if (sidx > 0) {
-                    [diag appendFormat:@" | %@✓表头sheet%ld", p.lastPathComponent, (long)sidx];
                     NSError *e = nil;
                     NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:sidx error:&e];
                     if (l && !e) { lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = sidx; break; }
-                } else if (shownMismatch < 3) {
-                    [diag appendFormat:@" | %@✗%@", p.lastPathComponent, [self headerMismatchInfo:domHeader file:p]];
-                    shownMismatch++;
                 }
-            }
-            if (!lines && shownMismatch >= 3 && recent2.count > 3) {
-                [diag appendFormat:@" | ...其余%lu个✗", (unsigned long)(recent2.count - shownMismatch)];
             }
         }
         // 第三遍：匹配不到（预览文件未另存进沙盒/表头差异）→ 回退最近里第一个能解析的文件(sheet1)，保证功能可用
         if (!lines) {
-            for (NSString *p in recent) {
+            for (NSString *p in ordered) {
                 NSError *e = nil;
                 NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:1 error:&e];
                 if (l && !e) { lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = 1; break; }
             }
-            if (lines) [diag appendFormat:@" | 回退%@ sheet1", (usedFile >= 0 ? ordered[(NSUInteger)usedFile].lastPathComponent : @"?")];
         }
-        [diag appendFormat:@" | %.1fs", ([NSDate timeIntervalSinceReferenceDate] - t0)];
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!lines) {
-                [diag appendString:@" → 复制失败"];
-                [Toast show:diag];
+                [Toast show:@"复制失败：未找到匹配的文件"];
                 return;
             }
             if (lines.count == 0) {
-                [diag appendString:@" → 该列无数据"];
-                [Toast show:diag];
+                [Toast show:@"复制失败：该列无数据"];
                 return;
             }
             NSString *joined = [lines componentsJoinedByString:@"\n"];
             [UIPasteboard generalPasteboard].string = joined;
             NSString *letter = [XLSXParser columnLetter:col];
-            NSInteger lastRow = (NSInteger)lines.count;
-            [diag appendFormat:@" → %@ sheet%ld 复制%@1-%@%ld共%lu条",
-             (usedFile >= 0 ? ordered[(NSUInteger)usedFile].lastPathComponent : @"?"), (long)usedSheet,
-             letter, letter, (long)lastRow, (unsigned long)lines.count];
-            [Toast show:diag];
+            if (usedFile >= 0 && usedFile < (NSInteger)ordered.count) {
+                [Toast show:[NSString stringWithFormat:@"✓ %@ sheet%ld 复制%@列共%lu条(含表头)",
+                             ordered[(NSUInteger)usedFile].lastPathComponent, (long)usedSheet,
+                             letter, (unsigned long)lines.count]];
+            } else {
+                [Toast show:[NSString stringWithFormat:@"✓ 复制%@列共%lu条(含表头)", letter, (unsigned long)lines.count]];
+            }
         });
     });
-}
-
-// 诊断用：DOM 表头 vs 文件 sheet1 表头 前5格对比（定位匹配失败原因）
-- (NSString *)headerMismatchInfo:(NSArray<NSString *> *)domHeader file:(NSString *)path {
-    NSError *e = nil;
-    NSDictionary *rows = [XLSXParser parseSheetAtPath:path sheetIndex:1 error:&e];
-    if (!rows) return [NSString stringWithFormat:@"解析失败(%ld)", (long)e.code];
-    NSDictionary *h = rows[@(1)];
-    NSMutableString *s = [NSMutableString stringWithString:@"表头"];
-    for (NSInteger i = 0; i < domHeader.count && i < 5; i++) {
-        NSString *d = domHeader[i];
-        NSString *f = [(h[@(i + 1)] ?: @"") stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (d.length == 0 && f.length == 0) continue;
-        [s appendFormat:@"[%ld]%@vs%@;", (long)(i + 1), (d.length > 4 ? [d substringToIndex:4] : d), (f.length > 4 ? [f substringToIndex:4] : f)];
-    }
-    return s;
 }
 
 #pragma mark - 复制匹配缓存（数据指纹 → 文件路径+sheet；老文件不用每次全库搜）
