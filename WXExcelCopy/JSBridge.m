@@ -31,7 +31,7 @@ static NSString *const kInjectScript =
 "  /* URL校验只对主frame生效（避免误入微信搜一搜等网页表格）；iframe内跳过——多sheet文件表格在x-apple-ql-id:// iframe里，其URL不含.xlsx */"
 "  if (window === window.top) {"
 "    var href = (location.href || '').toLowerCase();"
-"    if (href.indexOf('.xlsx') < 0) return;"
+"    if (href.indexOf('.xlsx') < 0 && href.indexOf('.xls') < 0) return;"
 "  }"
 "  document.__wxExcelCopyInjected = true;"
 "  function post(o){ try{ window.webkit.messageHandlers.wxExcelCopy.postMessage(o); }catch(e){} }"
