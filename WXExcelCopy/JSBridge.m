@@ -238,23 +238,29 @@ static NSString *const kInjectScript =
         NSArray<NSString *> *ordered = [self orderedCandidates:body[@"url"] ?: @""];
         NSArray<NSString *> *lines = nil;
         NSError *lastErr = nil;
-        for (NSString *p in ordered) {
-            NSInteger sidx = (domHeader.count > 0) ? [self matchedSheetIndexForHeader:domHeader file:p] : 0;
-            if (domHeader.count > 0 && sidx == 0) {
-                // 该文件表头与屏幕不一致（沙盒里可能有多个 xlsx，预览URL是x-apple-ql-id://拿不到路径）→ 跳过，继续找匹配的文件
-                lastErr = [NSError errorWithDomain:@"WXExcelCopy" code:99
-                                          userInfo:@{NSLocalizedDescriptionKey:@"表头不匹配"}];
-                continue;
+        // 第一遍：优先按表头匹配文件+sheet（修复多文件/多sheet取错；表头不一致的文件跳过）
+        if (domHeader.count > 0) {
+            for (NSString *p in ordered) {
+                NSInteger sidx = [self matchedSheetIndexForHeader:domHeader file:p];
+                if (sidx <= 0) continue;
+                NSError *e = nil;
+                NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:sidx error:&e];
+                if (l && !e) { lines = l; break; }
+                lastErr = e;
             }
-            NSInteger useIdx = (sidx > 0) ? sidx : 1; // 无表头指纹或匹配不到 sheet 时回退第一个 sheet
-            NSError *e = nil;
-            NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:useIdx error:&e];
-            if (l && !e) { lines = l; break; }
-            lastErr = e;
+        }
+        // 第二遍：匹配不到（预览文件未另存进沙盒/表头差异）→ 回退第一个能解析的文件(sheet1)，保证功能可用
+        if (!lines) {
+            for (NSString *p in ordered) {
+                NSError *e = nil;
+                NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:1 error:&e];
+                if (l && !e) { lines = l; break; }
+                lastErr = e;
+            }
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!lines || lastErr) {
-                [Toast show:([body[@"header"] length] > 0 ? @"未找到匹配的表格" : @"未找到可用文件")];
+                [Toast show:@"未找到可用文件"];
                 return;
             }
             if (lines.count == 0) {
