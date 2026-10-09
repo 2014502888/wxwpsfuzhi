@@ -10,8 +10,6 @@
 
 #pragma mark - Runtime helpers
 
-static void *kWXExcelInjectedKey = &kWXExcelInjectedKey;
-
 // 深度遍历视图树找第一个 WKWebView
 static WKWebView *FindWebViewInView(UIView *view, NSInteger depth) {
     if (depth > 12) return nil;
