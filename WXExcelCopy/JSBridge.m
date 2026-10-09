@@ -308,7 +308,7 @@ static NSString *const kInjectScript =
         NSString *d = domHeader[i];
         if (d.length == 0) continue;
         nonEmpty++;
-        NSString *s = [sheetRow[@(i + 1)] ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSString *s = [(sheetRow[@(i + 1)] ?: @"") stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if ([d isEqualToString:s]) matched++;
     }
     return nonEmpty > 0 && matched == nonEmpty;
