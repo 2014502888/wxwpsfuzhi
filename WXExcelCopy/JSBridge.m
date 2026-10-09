@@ -240,6 +240,8 @@ static NSString *const kInjectScript =
     NSArray<NSString *> *domHeader = [self splitHeaderSig:body[@"header"]];
     // DOM 数据指纹（A列前3行，SOH 分隔）：微信下载后文件名变数字，靠数据识别预览对应的下载文件
     NSArray<NSString *> *domData = [self splitHeaderSig:body[@"df"]];
+    // 缓存指纹 = 表头指纹+数据指纹拼接（同一文件多 sheet 因 A 列前3行不同而区分）
+    NSString *fp = [NSString stringWithFormat:@"%@%@", (body[@"header"] ?: @""), (body[@"df"] ?: @"")];
 
     // 后台解析，避免卡微信主线程
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -254,9 +256,22 @@ static NSString *const kInjectScript =
         NSInteger usedFile = -1, usedSheet = 1;
         NSInteger shownMismatch = 0;
         NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
+        // 第零遍：缓存命中（数据指纹→文件路径+sheet，命中直接解析这一个文件，不搜库；文件被删自动失效）
+        NSDictionary *cached = [self cachedMatchForFingerprint:fp];
+        if (cached) {
+            NSString *path = cached[@"path"];
+            NSInteger sidx = [cached[@"sheet"] integerValue];
+            NSError *e = nil;
+            NSArray *l = [XLSXParser columnLinesAtPath:path column:col fromRow:1 sheetIndex:sidx error:&e];
+            if (l && !e) {
+                NSInteger idx = (NSInteger)[ordered indexOfObject:path];
+                lines = l; usedFile = (idx == NSNotFound ? -1 : idx); usedSheet = sidx;
+                [diag appendFormat:@" | 缓存%@ sheet%ld", path.lastPathComponent, (long)sidx];
+            }
+        }
         // 第一遍：表头+A列前3行数据 都匹配 → 精确命中预览对应文件（同表头不同数据的文件跳过）。
         // 搜全部1777个（轻量解析只读前4行，快）；最近30里没有下载版时也能命中
-        if (domHeader.count > 0 && domData.count > 0) {
+        if (!lines && domHeader.count > 0 && domData.count > 0) {
             for (NSString *p in ordered) {
                 NSInteger sidx = [self matchedSheetIndexForHeader:domHeader data:domData col:1 file:p];
                 if (sidx > 0) {
@@ -265,6 +280,7 @@ static NSString *const kInjectScript =
                     if (l && !e) {
                         lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = sidx;
                         [diag appendFormat:@" | %@✓精确sheet%ld", p.lastPathComponent, (long)sidx];
+                        [self cacheMatchFingerprint:fp path:p sheet:sidx];
                         break;
                     }
                 } else if (shownMismatch < 2) {
@@ -340,6 +356,36 @@ static NSString *const kInjectScript =
         [s appendFormat:@"[%ld]%@vs%@;", (long)(i + 1), (d.length > 4 ? [d substringToIndex:4] : d), (f.length > 4 ? [f substringToIndex:4] : f)];
     }
     return s;
+}
+
+#pragma mark - 复制匹配缓存（数据指纹 → 文件路径+sheet；老文件不用每次全库搜）
+
+#define kWXMatchCacheKey @"WXExcelMatchCacheV1"
+#define kWXMatchCacheLimit 50
+
+// 命中返回缓存条目 {fp,path,sheet}；文件已删除则视为未命中
+- (NSDictionary *)cachedMatchForFingerprint:(NSString *)fp {
+    if (!fp || fp.length == 0) return nil;
+    NSArray *arr = [[NSUserDefaults standardUserDefaults] arrayForKey:kWXMatchCacheKey];
+    for (NSDictionary *d in arr) {
+        if ([d[@"fp"] isEqualToString:fp]) {
+            NSString *path = d[@"path"];
+            if (path && [[NSFileManager defaultManager] fileExistsAtPath:path]) return d;
+        }
+    }
+    return nil;
+}
+
+// 写入缓存（同指纹更新路径，最多保留最近 50 条）
+- (void)cacheMatchFingerprint:(NSString *)fp path:(NSString *)path sheet:(NSInteger)sheet {
+    if (!fp || fp.length == 0 || !path) return;
+    NSMutableArray *arr = [NSMutableArray arrayWithArray:[[NSUserDefaults standardUserDefaults] arrayForKey:kWXMatchCacheKey] ?: @[]];
+    for (NSInteger i = (NSInteger)arr.count - 1; i >= 0; i--) {
+        if ([arr[(NSUInteger)i][@"fp"] isEqualToString:fp]) [arr removeObjectAtIndex:(NSUInteger)i];
+    }
+    [arr insertObject:@{@"fp": fp, @"path": path, @"sheet": @(sheet)} atIndex:0];
+    while (arr.count > kWXMatchCacheLimit) [arr removeLastObject];
+    [[NSUserDefaults standardUserDefaults] setObject:arr forKey:kWXMatchCacheKey];
 }
 
 #pragma mark - 多 sheet 匹配（复制时按当前预览 sheet 取数）
