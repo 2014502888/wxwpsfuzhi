@@ -319,19 +319,21 @@ static NSInteger RowNumberFromRef(NSString *ref) {
     return names;
 }
 
-+ (NSDictionary<NSNumber *, NSDictionary<NSNumber *, NSString *> *> *)parseRowsAtPath:(NSString *)path
-                                                                                error:(NSError **)error {
++ (NSDictionary<NSNumber *, NSDictionary<NSNumber *, NSString *> *> *)parseSheetAtPath:(NSString *)path
+                                                                            sheetIndex:(NSInteger)index
+                                                                                 error:(NSError **)error {
     @try {
+    if (index < 1) index = 1;
     NSData *zip = [NSData dataWithContentsOfFile:path];
     if (!zip) {
         if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:1 userInfo:@{NSLocalizedDescriptionKey:@"无法读取文件"}];
         return nil;
     }
 
-    NSData *ssXml = ZipEntryData(zip, @"xl/sharedStrings.xml");
-    NSData *sheetXml = ZipEntryData(zip, @"xl/worksheets/sheet1.xml");
-    if (!sheetXml) {
-        // 放宽：遍历条目找任意 sheet/worksheet 开头的 xml
+    NSString *sheetName = [NSString stringWithFormat:@"xl/worksheets/sheet%ld.xml", (long)index];
+    NSData *sheetXml = ZipEntryData(zip, sheetName);
+    if (!sheetXml && index == 1) {
+        // 放宽：遍历条目找任意 sheet/worksheet 开头的 xml（兼容非标准命名）
         NSArray *entries = [self zipEntriesAtPath:path error:nil];
         for (NSString *e in entries) {
             NSString *low = e.lowercaseString;
@@ -343,11 +345,13 @@ static NSInteger RowNumberFromRef(NSString *ref) {
         }
     }
     if (!sheetXml) {
-        if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:2 userInfo:@{NSLocalizedDescriptionKey:@"未找到 sheet1.xml"}];
+        if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:2
+                                            userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"未找到 sheet%ld.xml", (long)index]}];
         return nil;
     }
 
     // sharedStrings
+    NSData *ssXml = ZipEntryData(zip, @"xl/sharedStrings.xml");
     NSMutableArray<NSString *> *shared = [NSMutableArray array];
     if (ssXml) {
         WXXMLParser *sp = [[WXXMLParser alloc] initWithSharedMode:YES];
@@ -357,7 +361,7 @@ static NSInteger RowNumberFromRef(NSString *ref) {
         shared = sp.sharedStrings;
     }
 
-    // sheet1
+    // sheet
     WXXMLParser *shp = [[WXXMLParser alloc] initWithSharedMode:NO];
     shp.sharedStrings = shared;
     NSXMLParser *xp2 = [[NSXMLParser alloc] initWithData:sheetXml];
@@ -377,12 +381,18 @@ static NSInteger RowNumberFromRef(NSString *ref) {
     }
 }
 
++ (NSDictionary<NSNumber *, NSDictionary<NSNumber *, NSString *> *> *)parseRowsAtPath:(NSString *)path
+                                                                                error:(NSError **)error {
+    return [self parseSheetAtPath:path sheetIndex:1 error:error];
+}
+
 + (NSArray<NSString *> *)columnLinesAtPath:(NSString *)path
                                     column:(NSInteger)col
                                    fromRow:(NSInteger)row
+                                sheetIndex:(NSInteger)sheetIndex
                                      error:(NSError **)error {
     @try {
-    NSDictionary *rows = [self parseRowsAtPath:path error:error];
+    NSDictionary *rows = [self parseSheetAtPath:path sheetIndex:sheetIndex error:error];
     if (!rows) return nil;
 
     NSInteger maxRow = 0;

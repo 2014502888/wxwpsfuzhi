@@ -65,6 +65,11 @@ static NSString *const kInjectScript =
 "    if (!table || !table.rows || table.rows.length < 1) return false;"
 "    var head = table.rows[0];"
 "    if (!head.cells || head.cells.length < 1) return false;"
+"    /* 表头指纹：各格文本以 SOH(\\u0001) 分隔，原生据此匹配当前激活sheet */"
+"    var headSig = '';"
+"    for (var hc=0;hc<head.cells.length;hc++){"
+"      headSig += (head.cells[hc].textContent || '').replace(/^\\s+|\\s+$/g,'') + '\\u0001';"
+"    }"
 "    /* 数量=该列非空单元格数，从当前表格 DOM 直接数（抬头行除外、空白格不计）*/"
 "    var counts = {};"
 "    for (var r=1;r<table.rows.length;r++){"
@@ -106,7 +111,7 @@ static NSString *const kInjectScript =
 "      l3.style.cssText = 'font-size:10px;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';"
 "      l3.textContent = hText.length > 4 ? (hText.slice(0,4) + '…') : hText;"
 "      item.appendChild(l3);"
-"      (function(cc){ item.addEventListener('click', function(){ post({type:'colcopy',col:cc}); }); })(c+1);"
+"      (function(cc, hs){ item.addEventListener('click', function(){ post({type:'colcopy',col:cc,header:hs}); }); })(c+1, headSig);"
 "      bar.appendChild(item);"
 "    }"
 "    anchor.appendChild(bar);"
@@ -225,14 +230,19 @@ static NSString *const kInjectScript =
     NSInteger col = [body[@"col"] integerValue];
     if (col < 1) return;
 
+    // DOM 表头指纹（JS 以 SOH 分隔各格文本），用于匹配当前激活 sheet
+    NSArray<NSString *> *domHeader = [self splitHeaderSig:body[@"header"]];
+
     // 后台解析，避免卡微信主线程
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSArray<NSString *> *ordered = [self orderedCandidates:body[@"url"] ?: @""];
         NSArray<NSString *> *lines = nil;
         NSError *lastErr = nil;
         for (NSString *p in ordered) {
+            NSInteger sidx = (domHeader.count > 0) ? [self matchedSheetIndexForHeader:domHeader file:p] : 0;
+            NSInteger useIdx = (sidx > 0) ? sidx : 1; // 匹配不到回退第一个 sheet
             NSError *e = nil;
-            NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 error:&e];
+            NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:useIdx error:&e];
             if (l && !e) { lines = l; break; }
             lastErr = e;
         }
@@ -253,6 +263,49 @@ static NSString *const kInjectScript =
                          letter, letter, (long)lastRow, (unsigned long)lines.count]];
         });
     });
+}
+
+#pragma mark - 多 sheet 匹配（复制时按当前预览 sheet 取数）
+
+// 拆 JS 表头指纹：SOH 分隔 → 各格文本（去首尾空白，去掉末尾空串）
+- (NSArray<NSString *> *)splitHeaderSig:(NSString *)sig {
+    if (!sig || sig.length == 0) return @[];
+    NSArray<NSString *> *parts = [sig componentsSeparatedByString:@"\u0001"];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    for (NSString *s in parts) {
+        NSString *t = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        [out addObject:t];
+    }
+    while (out.count > 0 && out.lastObject.length == 0) [out removeLastObject];
+    return out;
+}
+
+// 在文件里找与 DOM 表头匹配的 sheet 索引（1-based）；找不到返回 0
+- (NSInteger)matchedSheetIndexForHeader:(NSArray<NSString *> *)domHeader file:(NSString *)path {
+    for (NSInteger idx = 1; idx <= 64; idx++) {
+        NSError *e = nil;
+        NSDictionary *rows = [XLSXParser parseSheetAtPath:path sheetIndex:idx error:&e];
+        if (!rows) {
+            if (e && e.code == 2) break; // sheetN.xml 不存在 → 枚举结束
+            continue;                     // 空表/解析异常 → 下一个 sheet
+        }
+        NSDictionary *h = rows[@(1)];
+        if (h && [self headerMatches:domHeader sheetRow:h]) return idx;
+    }
+    return 0;
+}
+
+// DOM 表头非空格全部与文件表头同位置文本一致 → 匹配
+- (BOOL)headerMatches:(NSArray<NSString *> *)domHeader sheetRow:(NSDictionary *)sheetRow {
+    NSInteger nonEmpty = 0, matched = 0;
+    for (NSInteger i = 0; i < domHeader.count; i++) {
+        NSString *d = domHeader[i];
+        if (d.length == 0) continue;
+        nonEmpty++;
+        NSString *s = [sheetRow[@(i + 1)] ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([d isEqualToString:s]) matched++;
+    }
+    return nonEmpty > 0 && matched == nonEmpty;
 }
 
 #pragma mark - xlsx 扫描（只读 Documents/<乱码>/OpenData/<乱码>/<xlsx>，不递归其他目录）
