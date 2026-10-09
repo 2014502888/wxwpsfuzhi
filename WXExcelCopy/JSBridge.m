@@ -15,6 +15,9 @@ static const char *kBridgeObjKey = "wxExcelCopyBridge";
 static NSString *const kInjectScript =
 @"(function(){"
 "  if (document.__wxExcelCopyInjected) return;"
+"  /* 只对微信 xlsx 预览页注入：URL 必须含 .xlsx，否则跳过（避免误入微信搜一搜等网页表格）*/"
+"  var href = (location.href || '').toLowerCase();"
+"  if (href.indexOf('.xlsx') < 0) return;"
 "  document.__wxExcelCopyInjected = true;"
 "  function post(o){ try{ window.webkit.messageHandlers.wxExcelCopy.postMessage(o); }catch(e){} }"
 "  /* 序列号已按用户要求删除：不注入行号列，表格回归原始布局 */"
