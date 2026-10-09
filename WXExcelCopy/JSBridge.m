@@ -130,7 +130,21 @@ static NSString *const kInjectScript =
 "      l3.style.cssText = 'font-size:10px;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';"
 "      l3.textContent = hText.length > 4 ? (hText.slice(0,4) + '…') : hText;"
 "      item.appendChild(l3);"
-"      (function(cc, hs, ds){ item.addEventListener('click', function(){ post({type:'colcopy',col:cc,header:hs,df:ds}); }); })(c+1, headSig, dataSig);"
+"      (function(cc, hs, ds, tb){ item.addEventListener('click', function(){"
+"        /* DOM直取：直接从预览表格读该列全部非空值（跳过表头行），所见即所得，.xls/.xlsx通吃、不依赖文件匹配 */"
+"        var dv = [];"
+"        try{"
+"          var rows = tb.rows;"
+"          for (var r=1;r<rows.length;r++){"
+"            var cells = rows[r].cells;"
+"            if (cc-1 < cells.length){"
+"              var v = (cells[cc-1].textContent || '').replace(/^\\s+|\\s+$/g,'');"
+"              if (v) dv.push(v);"
+"            }"
+"          }"
+"        }catch(e){}"
+"        post({type:'colcopy',col:cc,header:hs,df:ds,domVals:dv});"
+"      }); })(c+1, headSig, dataSig, table);"
 "      bar.appendChild(item);"
 "    }"
 "    anchor.appendChild(bar);"
@@ -254,6 +268,25 @@ static NSString *const kInjectScript =
     NSInteger col = [body[@"col"] integerValue];
     if (col < 1) return;
 
+    // DOM 直取优先：JS 已从预览表格读出该列全部非空值（跳过表头），所见即所得——
+    // .xls/.xlsx 通吃、不依赖文件匹配（613 这类取错文件问题彻底消失）
+    NSArray *domVals = body[@"domVals"];
+    if ([domVals isKindOfClass:[NSArray class]] && domVals.count >= 2) {
+        NSMutableArray *clean = [NSMutableArray array];
+        for (id v in domVals) {
+            if ([v isKindOfClass:[NSString class]]) {
+                NSString *s = [v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (s.length > 0) [clean addObject:s];
+            }
+        }
+        if (clean.count >= 2) {
+            [UIPasteboard generalPasteboard].string = [clean componentsJoinedByString:@"\n"];
+            [Toast show:[NSString stringWithFormat:@"✓ 预览复制 %lu 条", (unsigned long)clean.count]];
+            return;
+        }
+    }
+
+    // 兜底：文件解析（缓存→精确→表头→回退）——DOM 未取到/取不全时用
     // DOM 表头指纹（JS 以 SOH 分隔各格文本），用于匹配当前激活 sheet
     NSArray<NSString *> *domHeader = [self splitHeaderSig:body[@"header"]];
     // DOM 数据指纹（A列前3行，SOH 分隔）：微信下载后文件名变数字，靠数据识别预览对应的下载文件
