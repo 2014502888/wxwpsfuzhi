@@ -236,32 +236,41 @@ static NSString *const kInjectScript =
     // 后台解析，避免卡微信主线程
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSArray<NSString *> *ordered = [self orderedCandidates:body[@"url"] ?: @""];
-        NSMutableString *diag = [NSMutableString stringWithFormat:@"复制诊断 col=%ld header=%lu格", (long)col, (unsigned long)domHeader.count];
-        [diag appendFormat:@" 沙盒%lu个:", (unsigned long)ordered.count];
-        for (NSString *p in ordered) [diag appendFormat:@" %@", p.lastPathComponent];
+        // 匹配只查最近 30 个（微信刚预览的文件几乎必在最近打开列表；1777个全遍历太慢）
+        NSUInteger limit = MIN(30u, ordered.count);
+        NSArray<NSString *> *recent = [ordered subarrayWithRange:NSMakeRange(0, limit)];
+        NSMutableString *diag = [NSMutableString stringWithFormat:@"复制诊断 col=%ld header=%lu格 沙盒%lu个(查最近%lu):", (long)col, (unsigned long)domHeader.count, (unsigned long)ordered.count, (unsigned long)recent.count];
+        for (NSUInteger i = 0; i < recent.count && i < 3; i++) [diag appendFormat:@" %@", recent[i].lastPathComponent];
+        if (recent.count > 3) [diag appendFormat:@" ...等%lu个", (unsigned long)(recent.count - 3)];
         NSArray<NSString *> *lines = nil;
         NSInteger usedFile = -1, usedSheet = 1;
+        NSInteger shownMismatch = 0;
         // 第一遍：优先按表头匹配文件+sheet（修复多文件/多sheet取错；表头不一致的文件跳过）
         if (domHeader.count > 0) {
-            for (NSString *p in ordered) {
+            for (NSString *p in recent) {
                 NSInteger sidx = [self matchedSheetIndexForHeader:domHeader file:p];
                 if (sidx > 0) {
-                    [diag appendFormat:@" | %@→sheet%ld匹配✓", p.lastPathComponent, (long)sidx];
+                    [diag appendFormat:@" | %@✓sheet%ld", p.lastPathComponent, (long)sidx];
                     NSError *e = nil;
                     NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:sidx error:&e];
                     if (l && !e) { lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = sidx; break; }
-                } else {
+                } else if (shownMismatch < 5) {
                     [diag appendFormat:@" | %@✗%@", p.lastPathComponent, [self headerMismatchInfo:domHeader file:p]];
+                    shownMismatch++;
                 }
             }
+            if (!lines && shownMismatch >= 5 && recent.count > 5) {
+                [diag appendFormat:@" | ...其余%lu个✗", (unsigned long)(recent.count - shownMismatch)];
+            }
         }
-        // 第二遍：匹配不到（预览文件未另存进沙盒/表头差异）→ 回退第一个能解析的文件(sheet1)，保证功能可用
+        // 第二遍：匹配不到（预览文件未另存进沙盒/表头差异）→ 回退最近里第一个能解析的文件(sheet1)，保证功能可用
         if (!lines) {
-            for (NSString *p in ordered) {
+            for (NSString *p in recent) {
                 NSError *e = nil;
                 NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:1 error:&e];
                 if (l && !e) { lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = 1; break; }
             }
+            if (lines) [diag appendFormat:@" | 回退%@ sheet1", (usedFile >= 0 ? ordered[(NSUInteger)usedFile].lastPathComponent : @"?")];
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!lines) {
