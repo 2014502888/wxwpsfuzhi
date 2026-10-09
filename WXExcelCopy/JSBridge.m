@@ -253,24 +253,31 @@ static NSString *const kInjectScript =
         NSArray<NSString *> *lines = nil;
         NSInteger usedFile = -1, usedSheet = 1;
         NSInteger shownMismatch = 0;
-        // 第一遍：表头+A列前3行数据 都匹配 → 精确命中预览对应文件（同表头不同数据的文件跳过）
+        NSTimeInterval t0 = [NSDate timeIntervalSinceReferenceDate];
+        // 第一遍：表头+A列前3行数据 都匹配 → 精确命中预览对应文件（同表头不同数据的文件跳过）。
+        // 搜全部1777个（轻量解析只读前4行，快）；最近30里没有下载版时也能命中
         if (domHeader.count > 0 && domData.count > 0) {
-            for (NSString *p in recent) {
+            for (NSString *p in ordered) {
                 NSInteger sidx = [self matchedSheetIndexForHeader:domHeader data:domData col:1 file:p];
                 if (sidx > 0) {
-                    [diag appendFormat:@" | %@✓精确sheet%ld", p.lastPathComponent, (long)sidx];
                     NSError *e = nil;
                     NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:sidx error:&e];
-                    if (l && !e) { lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = sidx; break; }
-                } else if (shownMismatch < 3) {
+                    if (l && !e) {
+                        lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = sidx;
+                        [diag appendFormat:@" | %@✓精确sheet%ld", p.lastPathComponent, (long)sidx];
+                        break;
+                    }
+                } else if (shownMismatch < 2) {
                     [diag appendFormat:@" | %@✗%@", p.lastPathComponent, [self headerMismatchInfo:domHeader file:p]];
                     shownMismatch++;
                 }
             }
+            if (!lines) [diag appendFormat:@" | 精确搜%lu个全✗", (unsigned long)ordered.count];
         }
         // 第二遍：仅表头匹配（无数据指纹或精确未中时，表头一致的文件也能用——比回退更接近预览内容）
         if (!lines && domHeader.count > 0) {
-            for (NSString *p in recent) {
+            NSArray<NSString *> *recent2 = (recent.count > 0 ? recent : ordered);
+            for (NSString *p in recent2) {
                 NSInteger sidx = [self matchedSheetIndexForHeader:domHeader file:p];
                 if (sidx > 0) {
                     [diag appendFormat:@" | %@✓表头sheet%ld", p.lastPathComponent, (long)sidx];
@@ -282,8 +289,8 @@ static NSString *const kInjectScript =
                     shownMismatch++;
                 }
             }
-            if (!lines && shownMismatch >= 3 && recent.count > 3) {
-                [diag appendFormat:@" | ...其余%lu个✗", (unsigned long)(recent.count - shownMismatch)];
+            if (!lines && shownMismatch >= 3 && recent2.count > 3) {
+                [diag appendFormat:@" | ...其余%lu个✗", (unsigned long)(recent2.count - shownMismatch)];
             }
         }
         // 第三遍：匹配不到（预览文件未另存进沙盒/表头差异）→ 回退最近里第一个能解析的文件(sheet1)，保证功能可用
@@ -295,6 +302,7 @@ static NSString *const kInjectScript =
             }
             if (lines) [diag appendFormat:@" | 回退%@ sheet1", (usedFile >= 0 ? ordered[(NSUInteger)usedFile].lastPathComponent : @"?")];
         }
+        [diag appendFormat:@" | %.1fs", ([NSDate timeIntervalSinceReferenceDate] - t0)];
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!lines) {
                 [diag appendString:@" → 复制失败"];
@@ -364,11 +372,11 @@ static NSString *const kInjectScript =
     return 0;
 }
 
-// 表头 + 数据指纹（指定列前N行）都匹配 → 精确命中；找不到返回 0
+// 表头 + 数据指纹（指定列前N行）都匹配 → 精确命中；找不到返回 0（轻量解析只读前4行，可全库遍历）
 - (NSInteger)matchedSheetIndexForHeader:(NSArray<NSString *> *)domHeader data:(NSArray<NSString *> *)domData col:(NSInteger)col file:(NSString *)path {
     for (NSInteger idx = 1; idx <= 64; idx++) {
         NSError *e = nil;
-        NSDictionary *rows = [XLSXParser parseSheetAtPath:path sheetIndex:idx error:&e];
+        NSDictionary *rows = [XLSXParser parseSheetAtPath:path sheetIndex:idx maxRows:4 error:&e];
         if (!rows) {
             if (e && e.code == 2) break;
             continue;

@@ -172,6 +172,7 @@ static NSInteger RowNumberFromRef(NSString *ref) {
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, NSString *> *> *rows;
 @property (nonatomic, strong) NSMutableArray<NSString *> *sharedStrings;
 @property (nonatomic) BOOL sharedMode;
+@property (nonatomic) NSInteger maxRows; // 0=不限；>0 只解析前 maxRows 个非空行（轻量匹配用）
 
 // 状态机
 @property (nonatomic, strong) NSString *curCellRef;
@@ -211,7 +212,13 @@ static NSInteger RowNumberFromRef(NSString *ref) {
         return;
     }
 
-    if ([elementName isEqualToString:@"c"]) {
+    if ([elementName isEqualToString:@"row"]) {
+        // 轻量模式：已解析的非空行数达到上限即中止（已解析数据保留在 rows 里）
+        if (self.maxRows > 0 && self.rows.count >= self.maxRows) {
+            [parser abortParsing];
+            return;
+        }
+    } else if ([elementName isEqualToString:@"c"]) {
         self.curCellRef = attributeDict[@"r"];
         self.curCellType = attributeDict[@"t"];
         self.inValue = NO;
@@ -322,6 +329,13 @@ static NSInteger RowNumberFromRef(NSString *ref) {
 + (NSDictionary<NSNumber *, NSDictionary<NSNumber *, NSString *> *> *)parseSheetAtPath:(NSString *)path
                                                                             sheetIndex:(NSInteger)index
                                                                                  error:(NSError **)error {
+    return [self parseSheetAtPath:path sheetIndex:index maxRows:0 error:error];
+}
+
++ (NSDictionary<NSNumber *, NSDictionary<NSNumber *, NSString *> *> *)parseSheetAtPath:(NSString *)path
+                                                                            sheetIndex:(NSInteger)index
+                                                                               maxRows:(NSInteger)maxRows
+                                                                                 error:(NSError **)error {
     @try {
     if (index < 1) index = 1;
     NSData *zip = [NSData dataWithContentsOfFile:path];
@@ -364,9 +378,10 @@ static NSInteger RowNumberFromRef(NSString *ref) {
     // sheet
     WXXMLParser *shp = [[WXXMLParser alloc] initWithSharedMode:NO];
     shp.sharedStrings = shared;
+    shp.maxRows = (maxRows > 0) ? maxRows : 0;
     NSXMLParser *xp2 = [[NSXMLParser alloc] initWithData:sheetXml];
     xp2.delegate = shp;
-    [xp2 parse];
+    [xp2 parse]; // 轻量模式可能因 maxRows abortParsing（返回 NO），已解析行保留在 rows
 
     if (shp.rows.count == 0) {
         if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:3 userInfo:@{NSLocalizedDescriptionKey:@"表格无数据"}];

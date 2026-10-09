@@ -12,6 +12,13 @@
                                                                             sheetIndex:(NSInteger)index
                                                                                  error:(NSError **)error;
 
+// 轻量模式：只解析前 maxRows 行（表头+前几行数据指纹匹配用，避免1777个文件全量解析卡顿）；
+// maxRows<=0 时等同全量解析
++ (NSDictionary<NSNumber *, NSDictionary<NSNumber *, NSString *> *> *)parseSheetAtPath:(NSString *)path
+                                                                            sheetIndex:(NSInteger)index
+                                                                               maxRows:(NSInteger)maxRows
+                                                                                 error:(NSError **)error;
+
 // 列出 zip 内所有条目名（诊断用）
 + (NSArray<NSString *> *)zipEntriesAtPath:(NSString *)path error:(NSError **)error;
 
