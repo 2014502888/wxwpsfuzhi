@@ -12,7 +12,9 @@ static NSString *const kBridgeName = @"wxExcelCopy";
 static const char *kInjectedKey = "wxExcelCopyInjected";
 static const char *kBridgeObjKey = "wxExcelCopyBridge";
 
-static NSString *const kInjectScript =
+// __attribute__((used))：强制保留该常量——Xcode16 新 clang 曾把长 ObjC 字符串字面量
+// 优化移除导致产物不含注入脚本（自检 setInterval 缺失），加 used 防止被裁
+static NSString *const kInjectScript __attribute__((used)) =
 @"(function(){"
 "  if (document.__wxExcelCopyInjected) return;"
 "  /* URL校验只对主frame生效（避免误入微信搜一搜等网页表格）；iframe内跳过——多sheet文件表格在x-apple-ql-id:// iframe里，其URL不含.xlsx/.xls */"
