@@ -58,8 +58,21 @@ static BOOL gInstalled;
 
 + (void)onLoad:(WKWebView *)wv url:(NSURL *)url {
     if (!wv) return;
-    // 所有 WebView 都注入 JS（点击复制逻辑本身无害，命中与否由 JS 侧单元格点击决定）
-    [JSBridge injectInto:wv];
+    // 2026-10-16 方案1：只对 xlsx/xls 文件预览 WebView 注入；微信其它 WebView
+    // （聊天网页/公众号/小程序/其它文档预览）完全放行——不挂 message handler、
+    // 不加 user script，零干预。
+    // 原因：此前 hook 微信所有 WebView 并注入，微信整体变重；打开超大 xlsx
+    // （如 sheet1.xml 解压 126MB）时，微信 WPS 渲染本就接近单进程内存上限，
+    // 插件对每个 WebView 的附加操作把微信推到 per-process-limit（4.06GB）被
+    // Jetsam 杀掉（bug_type 298 / reason per-process-limit）。实测卸载插件不闪退、
+    // 装上闪退，差异就在这份全局干预。
+    // 过滤口径与 JS 侧主 frame URL 校验一致：主 frame file://xxx.xlsx 或 .xls
+    // 才注入；多 sheet 表格所在 iframe（x-apple-ql-id://）属 WebKit 内部导航，
+    // 不经 load 方法，不受影响。
+    NSString *low = (url.absoluteString ?: @"").lowercaseString;
+    if ([low containsString:@".xlsx"] || [low containsString:@".xls"]) {
+        [JSBridge injectInto:wv];
+    }
 }
 
 @end
