@@ -337,6 +337,40 @@ static NSInteger RowNumberFromRef(NSString *ref) {
     return names;
 }
 
++ (NSInteger)largestSheetUncompressedSizeAtPath:(NSString *)path {
+    NSData *zip = [NSData dataWithContentsOfFile:path];
+    if (!zip) return 0;
+    const uint8_t *bytes = zip.bytes;
+    NSUInteger len = zip.length;
+    if (len < 22) return 0;
+
+    NSInteger eocd = FindEOCD(bytes, len);
+    if (eocd < 0) return 0;
+
+    uint16_t cdEntries = R16(bytes + eocd + 10);
+    uint32_t cdStart = R32(bytes + eocd + 16);
+    uint64_t p = cdStart; // 64 位游标防回绕
+    NSInteger maxUncomp = 0;
+    for (uint16_t e = 0; e < cdEntries; e++) {
+        if (p + 46 > (uint64_t)len) break;
+        if (R32(bytes + (NSUInteger)p) != kCentralDirSig) break;
+        uint32_t uncompSize = R32(bytes + (NSUInteger)p + 24);
+        uint16_t nameLen = R16(bytes + (NSUInteger)p + 28);
+        uint16_t extraLen = R16(bytes + (NSUInteger)p + 30);
+        uint16_t commentLen = R16(bytes + (NSUInteger)p + 32);
+        if (p + 46 + nameLen > (uint64_t)len) break;
+        NSString *n = [[NSString alloc] initWithBytes:(bytes + (NSUInteger)p + 46) length:nameLen encoding:NSUTF8StringEncoding];
+        if (n && [n.lowercaseString hasPrefix:@"xl/worksheets/"] && [n.lowercaseString hasSuffix:@".xml"]) {
+            // zip64 占位（0xFFFFFFFF）：真实值在 extra 的 zip64 字段，此处保守按 0 计
+            if (uncompSize != 0xFFFFFFFFu && (NSInteger)uncompSize > maxUncomp) {
+                maxUncomp = (NSInteger)uncompSize;
+            }
+        }
+        p += 46 + nameLen + extraLen + commentLen;
+    }
+    return maxUncomp;
+}
+
 + (NSDictionary<NSNumber *, NSDictionary<NSNumber *, NSString *> *> *)parseSheetAtPath:(NSString *)path
                                                                             sheetIndex:(NSInteger)index
                                                                                  error:(NSError **)error {

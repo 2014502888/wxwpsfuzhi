@@ -34,6 +34,20 @@ jobs:
           ls -la out/
           file out/WXExcelCopy.dylib
 
+      - name: Self-check JS script embedded
+        run: |
+          echo "--- JSBridge.m info ---"
+          wc -l WXExcelCopy/JSBridge.m
+          shasum WXExcelCopy/JSBridge.m
+          echo "--- script strings check in dylib ---"
+          if strings out/WXExcelCopy.dylib | grep -q 'setInterval'; then
+            echo "OK: 注入脚本已嵌入 (setInterval found)"
+          else
+            echo "::error::注入脚本缺失! setInterval not found in dylib"
+            strings out/WXExcelCopy.dylib | grep -i 'wxExcelCopy\|evaluateJavaScript\|injectInto' | head -30
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: wxexcelcopy-dylib

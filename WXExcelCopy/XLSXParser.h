@@ -22,6 +22,12 @@
 // 列出 zip 内所有条目名（兜底找 sheet xml 用）
 + (NSArray<NSString *> *)zipEntriesAtPath:(NSString *)path error:(NSError **)error;
 
+// 轻量读 zip 中央目录（不解压、不驻留数据）：返回 xl/worksheets/*.xml 中
+// 解压体积最大的那个的字节数；文件不可读/无 sheet 返回 0。
+// 用途：打开文件时判断是否超大 sheet（>8MB 跳过注入，避免微信渲染+注入
+// 叠加导致 CPU 超限被杀），只读 zip 尾部目录，开销极小。
++ (NSInteger)largestSheetUncompressedSizeAtPath:(NSString *)path;
+
 // 取 col 列从 row 行往下的所有行值（含中间空行，去掉尾部空行），每行一个元素；
 // sheetIndex：1-based，指定从哪个 sheet 取（默认第一个 sheet 用 sheetIndex=1）
 + (NSArray<NSString *> *)columnLinesAtPath:(NSString *)path

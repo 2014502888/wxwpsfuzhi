@@ -195,6 +195,15 @@ static NSString *const kInjectScript =
     NSNumber *flag = objc_getAssociatedObject(webView, kInjectedKey);
     if (flag && flag.boolValue) return;
 
+    // 方案2（2026-10-17）：超大 sheet（解压 >8MB）不注入不轮询——微信 WPS 渲染
+    // 大表 CPU 本就高，插件注入/轮询的附加开销会把微信推到 CPU 超限被系统杀
+    // （实测 wakeups 334/s 超 150 上限、CPU 平均 68% 超 50% 上限；卸载插件不闪退证实）。
+    // 大文件改走微信原生渲染：牺牲统计栏/复制功能，换取不闪退。
+    if ([self isBigFile:webView]) {
+        NSLog(@"[WXExcelCopy] 大文件跳过注入: %@", webView.URL.absoluteString ?: @"");
+        return;
+    }
+
     [self attachBridgeToWebView:webView];
 
     WKUserScript *script = [[WKUserScript alloc]
@@ -280,10 +289,22 @@ static NSString *const kInjectScript =
 
 + (void)ensureInjected:(WKWebView *)webView {
     if (!webView) return;
+    // 大文件不补注入（同 injectInto 口径，防 didFinish 阶段又注入空脚本/轮询）
+    if ([self isBigFile:webView]) return;
     // 补挂消息 handler：controller 粒度防重复（微信替换 controller 时新 controller 会重新挂上）
     [self attachBridgeToWebView:webView];
     // 直接在当前 document 运行点击注入脚本（WKUserScript 只在导航前注入，此时补一次立即生效）
     [webView evaluateJavaScript:kInjectScript completionHandler:nil];
+}
+
+// 判断是否为超大 sheet：file URL 且 xl/worksheets/*.xml 解压体积最大值 > 8MB
++ (BOOL)isBigFile:(WKWebView *)webView {
+    NSURL *u = webView.URL;
+    if (!u.isFileURL) return NO;
+    NSString *path = u.path;
+    if (!path || path.length == 0) return NO;
+    NSInteger big = [XLSXParser largestSheetUncompressedSizeAtPath:path];
+    return big > 8 * 1024 * 1024;
 }
 
 #pragma mark - 当前预览文件匹配（www 副本整体作为前缀，匹配 OpenData 完整文件）
