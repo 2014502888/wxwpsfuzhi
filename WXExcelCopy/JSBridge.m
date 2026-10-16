@@ -14,8 +14,9 @@ static const char *kBridgeObjKey = "wxExcelCopyBridge";
 
 // __attribute__((used))：强制保留该常量——Xcode16 新 clang 曾把长 ObjC 字符串字面量
 // 优化移除导致产物不含注入脚本（自检 setInterval 缺失），加 used 防止被裁
-static NSString *const kInjectScript __attribute__((used)) =
-@"(function(){"
+// C 字节字符串(全局数据段): 之前 NSString 字面量被 Xcode16 新 clang 编译时裁掉(自检setInterval缺失、产物字节数两次一致154304), C 数组常量编译/链接均不会移除, 脚本100%进产物
+static const char kInjectScriptC[] =
+"(function(){"
 "  if (document.__wxExcelCopyInjected) return;"
 "  /* URL校验只对主frame生效（避免误入微信搜一搜等网页表格）；iframe内跳过——多sheet文件表格在x-apple-ql-id:// iframe里，其URL不含.xlsx/.xls */"
 "  if (window === window.top) {"
@@ -209,7 +210,7 @@ static NSString *const kInjectScript __attribute__((used)) =
     [self attachBridgeToWebView:webView];
 
     WKUserScript *script = [[WKUserScript alloc]
-        initWithSource:kInjectScript
+        initWithSource:[NSString stringWithUTF8String:kInjectScriptC]
         injectionTime:WKUserScriptInjectionTimeAtDocumentStart
         forMainFrameOnly:NO];
     [webView.configuration.userContentController addUserScript:script];
@@ -296,7 +297,7 @@ static NSString *const kInjectScript __attribute__((used)) =
     // 补挂消息 handler：controller 粒度防重复（微信替换 controller 时新 controller 会重新挂上）
     [self attachBridgeToWebView:webView];
     // 直接在当前 document 运行点击注入脚本（WKUserScript 只在导航前注入，此时补一次立即生效）
-    [webView evaluateJavaScript:kInjectScript completionHandler:nil];
+    [webView evaluateJavaScript:[NSString stringWithUTF8String:kInjectScriptC] completionHandler:nil];
 }
 
 // 判断是否为超大 sheet：file URL 且 xl/worksheets/*.xml 解压体积最大值 > 8MB
