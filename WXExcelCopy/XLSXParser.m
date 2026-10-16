@@ -14,8 +14,10 @@ static inline uint64_t R64(const uint8_t *p) { return (uint64_t)R32(p) | ((uint6
 // 中央目录条目签名：字节 50 4B 01 02 → 小端数值 0x02014b50
 static const uint32_t kCentralDirSig = 0x02014b50u;
 
-#pragma mark - zip: raw deflate 解压
+#pragma mark - zip: raw deflate 解压（分块扩容，无 64MB 硬上限）
 
+// 分块 inflate：输出缓冲耗尽时动态扩容（步进最小 1MB），126MB 级 sheet 解压不炸。
+// 上限 1GB 仅为防损坏文件声明超大解压长度导致内存失控；Z_FINISH 保证完整解压。
 static NSData *InflateRaw(NSData *comp, NSUInteger expected) {
     z_stream strm;
     memset(&strm, 0, sizeof(strm));
@@ -23,12 +25,26 @@ static NSData *InflateRaw(NSData *comp, NSUInteger expected) {
     strm.next_in = (Bytef *)comp.bytes;
     strm.avail_in = (uInt)comp.length;
     NSUInteger cap = expected ? expected : (comp.length * 4 + 4096);
-    if (cap > 64 * 1024 * 1024) cap = 64 * 1024 * 1024; // 上限保护：防损坏文件声明的超大解压长度
     NSMutableData *out = [NSMutableData dataWithLength:cap];
-    strm.next_out = out.mutableBytes;
-    strm.avail_out = (uInt)out.length;
-    int r = inflate(&strm, Z_FINISH);
-    if (r != Z_STREAM_END) { inflateEnd(&strm); return nil; }
+    const NSUInteger kMax = 1024 * 1024 * 1024; // 1GB 防损坏文件声明超大
+    int r = Z_OK;
+    while (r != Z_STREAM_END) {
+        if (out.length - strm.total_out == 0) { // 输出空间耗尽 → 扩容
+            if (out.length >= kMax) { inflateEnd(&strm); return nil; }
+            NSUInteger grow = (out.length < 1024 * 1024) ? (1024 * 1024) : out.length;
+            NSUInteger nl = (out.length + grow > kMax) ? kMax : (out.length + grow);
+            [out setLength:nl];
+        }
+        strm.next_out = out.mutableBytes + strm.total_out;
+        strm.avail_out = (uInt)(out.length - strm.total_out);
+        r = inflate(&strm, Z_FINISH);
+        if (r == Z_STREAM_END) break;
+        if (r != Z_OK && r != Z_BUF_ERROR) { inflateEnd(&strm); return nil; }
+        if (strm.avail_in == 0 && strm.avail_out > 0) { // 输入耗尽但未到 END → 数据截断/损坏
+            inflateEnd(&strm);
+            return nil;
+        }
+    }
     [out setLength:strm.total_out];
     inflateEnd(&strm);
     return out;
@@ -175,6 +191,9 @@ static NSInteger RowNumberFromRef(NSString *ref) {
 @property (nonatomic) NSInteger maxRows; // 0=不限；>0 只解析前 maxRows 个非空行（轻量匹配用）
 @property (nonatomic) BOOL countMode; // 统计模式：只数每列非空单元格，不驻留行数据（大文件统计用）
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *colCounts;
+@property (nonatomic) NSInteger targetCol; // 单列模式：>0 只收该列非空值（行号→值），不构造整表（大文件复制用）
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *colRows;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *firstRow; // 单列模式下顺带记录第一行（表头）
 
 // 状态机
 @property (nonatomic, strong) NSString *curCellRef;
@@ -197,6 +216,8 @@ static NSInteger RowNumberFromRef(NSString *ref) {
         _sharedStrings = [NSMutableArray array];
         _curText = [NSMutableString string];
         _colCounts = [NSMutableDictionary dictionary];
+        _colRows = [NSMutableDictionary dictionary];
+        _firstRow = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -285,6 +306,17 @@ static NSInteger RowNumberFromRef(NSString *ref) {
         if (self.countMode) {
             NSNumber *c = self.colCounts[@(colNum)];
             self.colCounts[@(colNum)] = @((c ? c.integerValue : 0) + 1);
+            self.curCellRef = nil;
+            self.curCellType = nil;
+            return;
+        }
+        // 单列模式：只收目标列非空值（行号→值），顺带收第一行表头；内存 = 单列，不构造整表
+        if (self.targetCol > 0) {
+            if (rowNum == 1) {
+                self.firstRow[@(colNum)] = value;
+            } else if (colNum == self.targetCol) {
+                self.colRows[@(rowNum)] = value;
+            }
             self.curCellRef = nil;
             self.curCellType = nil;
             return;
@@ -514,25 +546,71 @@ static NSInteger RowNumberFromRef(NSString *ref) {
                                 sheetIndex:(NSInteger)sheetIndex
                                      error:(NSError **)error {
     @try {
-    NSDictionary *rows = [self parseSheetAtPath:path sheetIndex:sheetIndex error:error];
-    if (!rows) return nil;
-
-    NSInteger maxRow = 0;
-    for (NSNumber *r in rows.allKeys) {
-        if (r.integerValue > maxRow) maxRow = r.integerValue;
-    }
-    if (row < 1) row = 1;
-
-    NSMutableArray<NSString *> *lines = [NSMutableArray array];
-    NSInteger lastNonEmpty = -1;
-    for (NSInteger r = row; r <= maxRow; r++) {
-        NSString *v = rows[@(r)][@(col)] ?: @"";
-        [lines addObject:v];
-        if (v.length > 0) lastNonEmpty = r;
-    }
-    if (lastNonEmpty < 0) return @[];
-    NSInteger count = lastNonEmpty - row + 1;
-    return [lines subarrayWithRange:NSMakeRange(0, (NSUInteger)count)];
+        if (col < 1) col = 1;
+        if (row < 1) row = 1;
+        if (sheetIndex < 1) sheetIndex = 1;
+        NSData *zip = [NSData dataWithContentsOfFile:path];
+        if (!zip) {
+            if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:1 userInfo:@{NSLocalizedDescriptionKey:@"无法读取文件"}];
+            return nil;
+        }
+        NSString *sheetName = [NSString stringWithFormat:@"xl/worksheets/sheet%ld.xml", (long)sheetIndex];
+        NSData *sheetXml = ZipEntryData(zip, sheetName);
+        if (!sheetXml && sheetIndex == 1) {
+            NSArray *entries = [self zipEntriesAtPath:path error:nil];
+            for (NSString *e in entries) {
+                NSString *low = e.lowercaseString;
+                if ([low hasSuffix:@".xml"] &&
+                    ([low containsString:@"sheet"] || [low containsString:@"worksheet"])) {
+                    sheetXml = ZipEntryData(zip, e);
+                    if (sheetXml) break;
+                }
+            }
+        }
+        if (!sheetXml) {
+            if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:2
+                                                userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"未找到 sheet%ld.xml", (long)sheetIndex]}];
+            return nil;
+        }
+        // sharedStrings（流式解析，不驻留整表；inlineStr 文件无此条目则空）
+        NSData *ssXml = ZipEntryData(zip, @"xl/sharedStrings.xml");
+        NSMutableArray<NSString *> *shared = [NSMutableArray array];
+        if (ssXml) {
+            WXXMLParser *sp = [[WXXMLParser alloc] initWithSharedMode:YES];
+            NSXMLParser *xp = [[NSXMLParser alloc] initWithData:ssXml];
+            xp.delegate = sp;
+            [xp parse];
+            shared = sp.sharedStrings;
+        }
+        // 单列流式解析：只收目标列非空值 + 第一行表头，不构造整表（大文件复制内存 GB 级 → 单列+解压缓冲）
+        WXXMLParser *shp = [[WXXMLParser alloc] initWithSharedMode:NO];
+        shp.sharedStrings = shared;
+        shp.targetCol = col;
+        NSXMLParser *xp2 = [[NSXMLParser alloc] initWithData:sheetXml];
+        xp2.delegate = shp;
+        [xp2 parse];
+        if (shp.colRows.count == 0 && shp.firstRow.count == 0) {
+            if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:3 userInfo:@{NSLocalizedDescriptionKey:@"表格无数据"}];
+            return nil;
+        }
+        // 行号排序，fromRow 起，中间空行补 ""，去掉尾部空行（与原全量版 columnLinesAtPath 行为一致）
+        NSArray<NSNumber *> *sortedRows = [shp.colRows.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+            return [a compare:b];
+        }];
+        NSInteger maxRow = row;
+        for (NSNumber *r in sortedRows) {
+            if (r.integerValue > maxRow) maxRow = r.integerValue;
+        }
+        NSMutableArray<NSString *> *lines = [NSMutableArray array];
+        NSInteger lastNonEmpty = -1;
+        for (NSInteger r = row; r <= maxRow; r++) {
+            NSString *v = shp.colRows[@(r)] ?: @"";
+            [lines addObject:v];
+            if (v.length > 0) lastNonEmpty = r;
+        }
+        if (lastNonEmpty < 0) return @[];
+        NSInteger count = lastNonEmpty - row + 1;
+        return [lines subarrayWithRange:NSMakeRange(0, (NSUInteger)count)];
     } @catch (NSException *e) {
         if (error) *error = [NSError errorWithDomain:@"WXExcelCopy" code:98
                                             userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"解析异常(%@)", e.name]}];

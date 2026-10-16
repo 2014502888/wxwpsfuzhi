@@ -507,11 +507,12 @@ static const char kInjectScriptC[] =
     return out;
 }
 
-// 在文件里找与 DOM 表头匹配的 sheet 索引（1-based）；找不到返回 0
+// 在文件里找与 DOM 表头匹配的 sheet 索引（1-based）；找不到返回 0。
+// 轻量解析（maxRows:2 只读表头+首行），避免大文件/多 sheet 全量解析卡顿。
 - (NSInteger)matchedSheetIndexForHeader:(NSArray<NSString *> *)domHeader file:(NSString *)path {
     for (NSInteger idx = 1; idx <= 64; idx++) {
         NSError *e = nil;
-        NSDictionary *rows = [XLSXParser parseSheetAtPath:path sheetIndex:idx error:&e];
+        NSDictionary *rows = [XLSXParser parseSheetAtPath:path sheetIndex:idx maxRows:2 error:&e];
         if (!rows) {
             if (e && e.code == 2) break; // sheetN.xml 不存在 → 枚举结束
             continue;                     // 空表/解析异常 → 下一个 sheet
