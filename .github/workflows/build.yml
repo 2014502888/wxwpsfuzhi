@@ -30,6 +30,7 @@ jobs:
             WXExcelCopy/XLSXParser.m \
             WXExcelCopy/Toast.m \
             WXExcelCopy/WebViewProbe.m \
+            WXExcelCopy/XlsxNativeBar.m \
             -dynamiclib \
             -o out/WXExcelCopy.dylib
           ls -la out/

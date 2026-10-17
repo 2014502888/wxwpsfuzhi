@@ -135,7 +135,7 @@ static const char kInjectScriptC[] =
 "      item.style.cssText = 'padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.08);text-align:center;cursor:pointer;line-height:1.3;';"
 "      var l1 = document.createElement('div');"
 "      l1.style.cssText = 'font-weight:bold;';"
-"      l1.textContent = colLetter(c+1);"
+"      l1.textContent = colLetter(c+1) + '列';"
 "      item.appendChild(l1);"
 "      var l2 = document.createElement('div');"
 "      l2.style.cssText = 'font-variant-numeric:tabular-nums;';"
@@ -214,24 +214,25 @@ static const char kInjectScriptC[] =
     NSNumber *flag = objc_getAssociatedObject(webView, kInjectedKey);
     if (flag && flag.boolValue) return;
 
-    // 大文件（解压 >8MB）也注入，但脚本走轻量模式（window.__wxBigFile=true）：
-    // 不遍历全表数格/不 DOM 直取/无条件发 stat——计数由原生流式统计回填、复制走原生流式
-    // 文件解析。之前"跳过注入"会把统计栏 UI 一起跳掉（用户实测统计栏不显示），且大文件
-    // 闪退根因是脚本全表 textContent 遍历烧 CPU watchdog，不是注入本身——轻量模式
-    // 开销仅每个表一次 getBoundingClientRect + 建 UI bar，可忽略，不触发 CPU 超限。
+    // 大文件（解压 >8MB）彻底零注入——2026-10-17 实测：轻量注入下打开 126MB 大文件
+    // 仍被系统杀（wakeups 1049/1148/s 超 150 上限 + Jetsam 系统 free 只剩 24MB），
+    // heaviest stack 全是微信框架（无插件代码）→ 微信 WPS 渲染 126MB 大表本身
+    // CPU+内存双临界，任何注入开销都可能触发 watchdog。大文件改由 XlsxNativeBar
+    // 原生统计栏接管（WebViewProbe.onLoad 分支），这里只服务小文件。
+    if ([self isBigFile:webView]) {
+        NSLog(@"[WXExcelCopy] 大文件零注入, 走原生统计栏: %@", webView.URL.absoluteString ?: @"");
+        return;
+    }
+
     [self attachBridgeToWebView:webView];
 
-    BOOL big = [self isBigFile:webView];
-    NSString *scriptSrc = [NSString stringWithFormat:@"window.__wxBigFile = %@;\n%s",
-                           big ? @"true" : @"false", kInjectScriptC];
     WKUserScript *script = [[WKUserScript alloc]
-        initWithSource:scriptSrc
+        initWithSource:[NSString stringWithUTF8String:kInjectScriptC]
         injectionTime:WKUserScriptInjectionTimeAtDocumentStart
         forMainFrameOnly:NO];
     [webView.configuration.userContentController addUserScript:script];
 
     objc_setAssociatedObject(webView, kInjectedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (big) NSLog(@"[WXExcelCopy] 大文件轻量注入: %@", webView.URL.absoluteString ?: @"");
 }
 
 #pragma mark - WKScriptMessageHandler
@@ -308,14 +309,12 @@ static const char kInjectScriptC[] =
 
 + (void)ensureInjected:(WKWebView *)webView {
     if (!webView) return;
+    // 大文件不补注入（同 injectInto 口径：零注入，原生统计栏接管）
+    if ([self isBigFile:webView]) return;
     // 补挂消息 handler：controller 粒度防重复（微信替换 controller 时新 controller 会重新挂上）
     [self attachBridgeToWebView:webView];
-    // 直接在当前 document 运行点击注入脚本（WKUserScript 只在导航前注入，此时补一次立即生效）；
-    // 大文件同样补注入并带 __wxBigFile 标志（轻量模式，不烧 CPU）
-    BOOL big = [self isBigFile:webView];
-    NSString *scriptSrc = [NSString stringWithFormat:@"window.__wxBigFile = %@;\n%s",
-                           big ? @"true" : @"false", kInjectScriptC];
-    [webView evaluateJavaScript:scriptSrc completionHandler:nil];
+    // 直接在当前 document 运行点击注入脚本（WKUserScript 只在导航前注入，此时补一次立即生效）
+    [webView evaluateJavaScript:[NSString stringWithUTF8String:kInjectScriptC] completionHandler:nil];
 }
 
 // 判断是否为超大 sheet：file URL 且 xl/worksheets/*.xml 解压体积最大值 > 8MB

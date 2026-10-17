@@ -6,6 +6,7 @@
 #import <objc/runtime.h>
 #import "WebViewProbe.h"
 #import "JSBridge.h"
+#import "XlsxNativeBar.h"
 
 @implementation WebViewProbe
 
@@ -71,7 +72,16 @@ static BOOL gInstalled;
     // 不经 load 方法，不受影响。
     NSString *low = (url.absoluteString ?: @"").lowercaseString;
     if ([low containsString:@".xlsx"] || [low containsString:@".xls"]) {
-        [JSBridge injectInto:wv];
+        // 大文件（解压 >8MB）：彻底零注入 + 原生统计栏。崩溃根因：微信 WPS 渲染
+        // 126MB 大表本身 CPU+内存双临界（wakeups 1049/1148/s 超限、Jetsam 系统
+        // free 只剩 24MB；heaviest stack 无插件代码），任何 JS 注入的开销都可能
+        // 触发 watchdog——实测轻量注入仍崩。原生统计栏用 iOS UIView 叠加显示，
+        // 不碰网页、不用微信渲染字体，点击走原生流式复制。
+        if ([JSBridge isBigFile:wv]) {
+            [XlsxNativeBar showForWebView:wv url:url];
+        } else {
+            [JSBridge injectInto:wv];
+        }
     }
 }
 
