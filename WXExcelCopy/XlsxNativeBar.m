@@ -16,6 +16,10 @@
 @property (nonatomic, strong) NSArray<NSNumber *> *counts;
 @property (nonatomic, strong) NSArray<NSString *> *headers;
 @property (nonatomic) BOOL observing;
+@property (nonatomic, strong) NSTimer *pollTimer;
+@property (nonatomic) NSInteger stableSame;   // contentSize 连续相同采样次数
+@property (nonatomic) CGFloat lastHeight;     // 上次采样 contentSize.height
+@property (nonatomic) NSInteger stableTotal;  // 总采样次数（超时兜底）
 @end
 
 @implementation XlsxNativeBar
@@ -73,58 +77,45 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 - (void)buildBar {
     if (!self.webView) return;
     // 大表渲染慢：统计栏要贴着表格内容出现。loading==NO 只代表 HTML 框架加载完，
-    // 126MB 表格数据还在渲染（scrollView.contentSize 持续增长）——所以还要等
-    // contentSize 连续几次采样不再增长（渲染稳定）才真正叠 bar。
-    // 注意：绝不能用 KVO 监听 webView.loading——预览页可能在加载中途被微信释放，
-    // webView dealloc 时还有注册的 observer 会直接崩（KVO dealloc 检查）；轮询
-    // weak 引用，webView 释放后 block 自动退出，零崩溃风险。
-    if (self.webView.loading) {
-        [self pollLoadingThenBuild];
-        return;
+    // 126MB 表格数据还在渲染（scrollView.contentSize 持续增长）——统一用一个 NSTimer
+    // 轮询：等 loading 完成 且 contentSize 连续 4 次采样不再增长（渲染稳定）才叠 bar。
+    // 绝不能用 KVO 监听 webView.loading（预览页中途被微信释放 → observer 未移除 → 崩）；
+    // 也绝不能用递归 block + dispatch_after（自引用 block 复制有 use-after-free 风险，
+    // 实测 _dispatch_Block_copy EXC_BREAKPOINT 崩）。NSTimer+selector 完全避开这两类问题。
+    [self startPolling];
+}
+
+// 启动轮询 timer（0.3s 一次）
+- (void)startPolling {
+    [self stopPolling];
+    self.stableSame = 0;
+    self.lastHeight = 0;
+    self.stableTotal = 0;
+    self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:0.3
+                                                      target:self
+                                                    selector:@selector(pollTick)
+                                                    userInfo:nil
+                                                     repeats:YES];
+}
+
+- (void)pollTick {
+    if (!self.webView) { [self stopPolling]; return; }
+    // 还在加载：不采样（contentSize 可能为 0，避免误判稳定），等下一次
+    if (self.webView.loading) { return; }
+    CGFloat h = self.webView.scrollView.contentSize.height;
+    if (h == self.lastHeight) { self.stableSame++; }
+    else { self.stableSame = 1; self.lastHeight = h; }
+    self.stableTotal++;
+    // 连续 4 次（约 1.2s）contentSize 不再增长 = 渲染稳定；或 100 次（30s）超时强制叠
+    if (self.stableSame >= 4 || self.stableTotal >= 100) {
+        [self stopPolling];
+        [self doBuildBar];
     }
-    [self waitForStableThenBuild];
 }
 
-// 轮询 loading 直到加载完成（或 30s 超时），再走 contentSize 稳定判定
-- (void)pollLoadingThenBuild {
-    __weak typeof(self) ws = self;
-    __block NSInteger total = 0;
-    void (^poll)(void) = nil;
-    poll = ^{
-        __strong typeof(ws) s = ws;
-        if (!s || !s.webView) return;
-        if (!s.webView.loading || ++total >= 100) {
-            [s waitForStableThenBuild];
-        } else {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), poll);
-        }
-    };
-    poll();
-}
-
-// contentSize 稳定判定：每 300ms 采样一次，连续 4 次 contentSize 不再增长 → 表格渲染稳定
-// → 叠统计栏；超时 100 次（30s）强制叠（防极端情况永远等不到稳定）
-- (void)waitForStableThenBuild {
-    __block NSInteger sameCount = 0;
-    __block CGFloat lastH = 0;
-    __block NSInteger total = 0;
-    __weak typeof(self) ws = self;
-    void (^sample)(void) = nil;
-    sample = ^{
-        __strong typeof(ws) s = ws;
-        if (!s || !s.webView) return;
-        CGFloat h = s.webView.scrollView.contentSize.height;
-        if (h == lastH) { sameCount++; } else { sameCount = 1; lastH = h; }
-        total++;
-        if (sameCount >= 4 || total >= 100) {
-            [s doBuildBar];
-        } else {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), sample);
-        }
-    };
-    sample();
+- (void)stopPolling {
+    [self.pollTimer invalidate];
+    self.pollTimer = nil;
 }
 
 - (void)doBuildBar {
@@ -253,8 +244,9 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     });
 }
 
-// 释放/替换时移除 KVO observer 与 bar
+// 释放/替换时移除 KVO observer、停 timer、移除 bar
 - (void)detach {
+    [self stopPolling];
     if (self.observing && self.webView.scrollView) {
         @try {
             [self.webView.scrollView removeObserver:self forKeyPath:@"contentOffset"];
