@@ -72,12 +72,15 @@ static BOOL gInstalled;
     // 不经 load 方法，不受影响。
     NSString *low = (url.absoluteString ?: @"").lowercaseString;
     if ([low containsString:@".xlsx"] || [low containsString:@".xls"]) {
-        // 大文件（解压 >8MB）：彻底零注入 + 原生统计栏。崩溃根因：微信 WPS 渲染
+        // 大文件（解压 >8MB）：业务零注入 + 原生统计栏。崩溃根因：微信 WPS 渲染
         // 126MB 大表本身 CPU+内存双临界（wakeups 1049/1148/s 超限、Jetsam 系统
-        // free 只剩 24MB；heaviest stack 无插件代码），任何 JS 注入的开销都可能
+        // free 只剩 24MB；heaviest stack 无插件代码），任何业务 JS 注入的开销都可能
         // 触发 watchdog——实测轻量注入仍崩。原生统计栏用 iOS UIView 叠加显示，
         // 不碰网页、不用微信渲染字体，点击走原生流式复制。
+        // 仅允许一条 CSS 让位规则（injectInto 大文件分支，WKUserScript atDocumentStart
+        // 持久注入：表格渲染前就带 70px 偏移，无让位视觉差；体积极小无常驻）。
         if ([JSBridge isBigFile:wv]) {
+            [JSBridge injectInto:wv];
             [XlsxNativeBar showForWebView:wv url:url];
         } else {
             [JSBridge injectInto:wv];

@@ -198,13 +198,28 @@ static const char kInjectScriptC[] =
     NSNumber *flag = objc_getAssociatedObject(webView, kInjectedKey);
     if (flag && flag.boolValue) return;
 
-    // 大文件（解压 >8MB）彻底零注入——2026-10-17 实测：轻量注入下打开 126MB 大文件
-    // 仍被系统杀（wakeups 1049/1148/s 超 150 上限 + Jetsam 系统 free 只剩 24MB），
-    // heaviest stack 全是微信框架（无插件代码）→ 微信 WPS 渲染 126MB 大表本身
-    // CPU+内存双临界，任何注入开销都可能触发 watchdog。大文件改由 XlsxNativeBar
-    // 原生统计栏接管（WebViewProbe.onLoad 分支），这里只服务小文件。
+    // 大文件（解压 >8MB）：不注入任何业务脚本（统计栏/监听/常驻会触发 watchdog——
+    // 2026-10-17 实测：轻量注入下打开 126MB 大文件仍被系统杀（wakeups 1049/1148/s 超
+    // 150 上限 + Jetsam 系统 free 只剩 24MB），heaviest stack 全是微信框架（无插件代码）
+    // → 微信 WPS 渲染 126MB 大表本身 CPU+内存双临界）。只注入一条 CSS 让位规则
+    // （WKUserScript atDocumentStart：每次导航自动执行，style 在表格渲染前就存在，
+    // 表格从渲染起就带 70px 偏移——比 evaluateJavaScript 一次性注入（被页面重载冲掉）
+    // 真正提前让位；体积极小、一次执行完、无常驻，开销微秒级）。原生统计栏由
+    // WebViewProbe.onLoad 分支（XlsxNativeBar）接管。
     if ([self isBigFile:webView]) {
-        NSLog(@"[WXExcelCopy] 大文件零注入, 走原生统计栏: %@", webView.URL.absoluteString ?: @"");
+        NSLog(@"[WXExcelCopy] 大文件仅注入CSS让位规则, 原生统计栏接管: %@", webView.URL.absoluteString ?: @"");
+        WKUserScript *css = [[WKUserScript alloc]
+            initWithSource:@"(function(){"
+                "if(document.querySelector('style[data-wxshift]')){return;}"
+                "var s=document.createElement('style');"
+                "s.setAttribute('data-wxshift','1');"
+                "s.textContent='table{margin-left:70px !important}';"
+                "(document.head||document.documentElement).appendChild(s);"
+                "})();"
+            injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+            forMainFrameOnly:NO];
+        [webView.configuration.userContentController addUserScript:css];
+        objc_setAssociatedObject(webView, kInjectedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
 
