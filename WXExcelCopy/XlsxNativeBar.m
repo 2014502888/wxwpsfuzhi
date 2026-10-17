@@ -20,6 +20,7 @@
 @property (nonatomic) NSInteger stableSame;   // contentSize 连续相同采样次数
 @property (nonatomic) CGFloat lastHeight;     // 上次采样 contentSize.height
 @property (nonatomic) NSInteger stableTotal;  // 总采样次数（超时兜底）
+@property (nonatomic) BOOL shifted;           // 表格让位是否已执行
 @end
 
 @implementation XlsxNativeBar
@@ -168,15 +169,21 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     [self updateOffset];
 }
 
-// 稳定判定通过：直接显示统计栏（UI 已预创建，hidden=NO 零延迟）+ 表格让位
+// 稳定判定通过：直接显示统计栏（UI 已预创建，hidden=NO 零延迟）
+// 表格让位已在 pollTick（loading==NO 后）提前执行——表格渲染过程中就带着 70px 偏移，
+// 渲染完的排版已是让位后的，这里显示统计栏时表格不会再有被推的位移感。
 - (void)showBar {
     if (!self.webView || !self.bar) return;
     self.bar.hidden = NO;
+}
 
-    // 表格让位：一次性把预览表格向右推 70px（统计栏宽 68px），A/B 列完整露出不被遮挡。
-    // 仅执行一次样式调整，不做任何监听/处理逻辑、不挂 handler、有限重试(30×500ms=15s)后
-    // 自动结束，无常驻脚本——大文件临界状态下开销可忽略。此时表格已渲染稳定（contentSize
-    // 判定通过），DOM 必然存在，重试只是兜底微信二次渲染/虚拟滚动重建表格的时机。
+// 表格让位：一次性把预览表格向右推 70px（统计栏宽 68px），A/B 列完整露出不被遮挡。
+// 仅执行一次样式调整，不做任何监听/处理逻辑、不挂 handler、有限重试(30×500ms=15s)后
+// 自动结束，无常驻脚本——大文件临界状态下开销可忽略。提前到 loading==NO 后执行，
+// 让表格从渲染起就带 marginLeft=70px，显示统计栏时排版已是让位后的。
+- (void)shiftTable {
+    if (!self.webView || self.shifted) return;
+    self.shifted = YES;
     NSString *shift = @"(function(){"
         "var tries=0;"
         "function go(){"
@@ -206,6 +213,8 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     if (!self.webView) { [self stopPolling]; return; }
     // 还在加载：不采样（contentSize 可能为 0，避免误判稳定），等下一次
     if (self.webView.loading) { return; }
+    // 页面已可执行 JS：提前让位（表格从渲染起就带 marginLeft=70px，显示统计栏时无位移感）
+    [self shiftTable];
     CGFloat h = self.webView.scrollView.contentSize.height;
     if (h == self.lastHeight) { self.stableSame++; }
     else { self.stableSame = 1; self.lastHeight = h; }
