@@ -17,9 +17,6 @@
 @property (nonatomic, strong) NSArray<NSString *> *headers;
 @property (nonatomic) BOOL observing;
 @property (nonatomic, strong) NSTimer *pollTimer;
-@property (nonatomic) NSInteger stableSame;   // contentSize 连续相同采样次数
-@property (nonatomic) CGFloat lastHeight;     // 上次采样 contentSize.height
-@property (nonatomic) NSInteger stableTotal;  // 总采样次数（超时兜底）
 @property (nonatomic) BOOL shifted;           // 表格让位是否已执行
 @end
 
@@ -77,10 +74,9 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 
 - (void)buildBar {
     if (!self.webView) return;
-    // 大表渲染慢：统计栏要贴着表格内容出现。分两步——
-    // ① prepareBar：文件解析完就预创建统计栏 UI（hidden），显示零延迟准备；
-    // ② startPolling 轮询 contentSize：等 loading 完成且连续 4 次采样不再增长（渲染稳定）
-    //    才 showBar 显示（hidden=NO）——稳定瞬间直接显示，不再有创建 UI 的延迟。
+    // 文件解析完（数据就绪）直接创建并显示统计栏——不再等表格渲染完成。
+    // 统计栏与让位页面基本同时出现：数据来自后台流式解析（onLoad 即开始，秒级完成），
+    // 让位由 pollTick 在 loading==NO 时提前执行（表格从渲染起就带 70px 偏移）。
     // 绝不能用 KVO 监听 webView.loading（预览页中途被微信释放 → observer 未移除 → 崩）；
     // 也绝不能用递归 block + dispatch_after（自引用 block 复制有 use-after-free 风险，
     // 实测 _dispatch_Block_copy EXC_BREAKPOINT 崩）。NSTimer+selector 完全避开这两类问题。
@@ -88,7 +84,7 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     [self startPolling];
 }
 
-// 预创建统计栏 UI（hidden）并挂滚动跟随；稳定判定通过后 showBar 直接显示
+// 创建统计栏 UI 并直接显示 + 挂滚动跟随
 - (void)prepareBar {
     if (!self.webView) return;
     [self.bar removeFromSuperview];
@@ -156,7 +152,6 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 
     self.scroll = scroll;
     self.bar = bar;
-    bar.hidden = YES;   // 预创建：先隐藏，稳定判定通过瞬间显示（零延迟）
     [self.webView addSubview:bar];
     [self.webView bringSubviewToFront:bar];
 
@@ -167,14 +162,6 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
         self.observing = YES;
     }
     [self updateOffset];
-}
-
-// 稳定判定通过：直接显示统计栏（UI 已预创建，hidden=NO 零延迟）
-// 表格让位已在 pollTick（loading==NO 后）提前执行——表格渲染过程中就带着 70px 偏移，
-// 渲染完的排版已是让位后的，这里显示统计栏时表格不会再有被推的位移感。
-- (void)showBar {
-    if (!self.webView || !self.bar) return;
-    self.bar.hidden = NO;
 }
 
 // 表格让位：一次性把预览表格向右推 70px（统计栏宽 68px），A/B 列完整露出不被遮挡。
@@ -196,12 +183,9 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     [self.webView evaluateJavaScript:shift completionHandler:nil];
 }
 
-// 启动轮询 timer（0.3s 一次）
+// 启动轮询 timer（0.3s 一次）——只负责等 loading==NO 后让位
 - (void)startPolling {
     [self stopPolling];
-    self.stableSame = 0;
-    self.lastHeight = 0;
-    self.stableTotal = 0;
     self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:0.3
                                                       target:self
                                                     selector:@selector(pollTick)
@@ -211,18 +195,10 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 
 - (void)pollTick {
     if (!self.webView) { [self stopPolling]; return; }
-    // 还在加载：不采样（contentSize 可能为 0，避免误判稳定），等下一次
-    if (self.webView.loading) { return; }
     // 页面已可执行 JS：提前让位（表格从渲染起就带 marginLeft=70px，显示统计栏时无位移感）
-    [self shiftTable];
-    CGFloat h = self.webView.scrollView.contentSize.height;
-    if (h == self.lastHeight) { self.stableSame++; }
-    else { self.stableSame = 1; self.lastHeight = h; }
-    self.stableTotal++;
-    // 连续 4 次（约 1.2s）contentSize 不再增长 = 渲染稳定；或 100 次（30s）超时强制显示
-    if (self.stableSame >= 4 || self.stableTotal >= 100) {
+    if (!self.webView.loading) {
+        [self shiftTable];
         [self stopPolling];
-        [self showBar];
     }
 }
 
