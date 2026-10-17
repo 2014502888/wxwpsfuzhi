@@ -1,6 +1,7 @@
 // XlsxNativeBar.m — 大文件原生统计栏（见 .h 说明）
 #import "XlsxNativeBar.h"
 #import <WebKit/WebKit.h>
+#import <objc/runtime.h>
 #import "JSBridge.h"
 #import "XLSXParser.h"
 #import "Toast.h"
