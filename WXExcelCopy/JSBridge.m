@@ -24,6 +24,10 @@ static const char kInjectScriptC[] =
 "    if (href.indexOf('.xlsx') < 0 && href.indexOf('.xls') < 0) return;"
 "  }"
 "  document.__wxExcelCopyInjected = true;"
+"  /* 大文件标志：原生注入时拼接 window.__wxBigFile=true/false 在脚本之前；"
+"  大文件(解压>8MB)走轻量模式——不遍历全表数格/不DOM直取(预览只渲染前~4096行, 且全表textContent会烧穿CPU watchdog), "
+"  计数由原生流式stat回填, 复制走原生流式文件解析 */"
+"  var BIG = !!window.__wxBigFile;"
 "  function post(o){ try{ window.webkit.messageHandlers.wxExcelCopy.postMessage(o); }catch(e){} }"
 "  /* 读单元格纯文本：排除统计栏(#__wxExcelBar挂在A列第一格内)，否则textContent会把统计栏文字也读进去 */"
 "  function cellText(cell){"
@@ -50,6 +54,12 @@ static const char kInjectScriptC[] =
 "      if (st.display === 'none' || st.visibility === 'hidden') continue;"
 "      var rc = t.getBoundingClientRect();"
 "      if (rc.width === 0 || rc.height === 0) continue;"
+"      if (BIG){"
+"        /* 大文件轻量：不遍历全表数格（textContent全表×2遍是CPU杀手），只看可见表行数取最大——"
+"        数据表行数远大于空sheet，足够选出正确表格，开销仅每个表一次getBoundingClientRect */"
+"        if (!best || t.rows.length > best.rows.length){ best = t; }"
+"        continue;"
+"      }"
 "      /* 可见表里选非空单元格最多的（真正的数据表，空白sheet不会入选）*/"
 "      var cnt = 0;"
 "      for (var rr=0;rr<t.rows.length;rr++){"
@@ -92,14 +102,17 @@ static const char kInjectScriptC[] =
 "      var c0 = table.rows[di].cells[0];"
 "      dataSig += cellText(c0) + '\\u0001';"
 "    }"
-"    /* 数量=该列非空单元格数，从当前表格 DOM 直接数（抬头行也计入，与复制口径一致；空白格不计）*/"
+"    /* 数量=该列非空单元格数，从当前表格 DOM 直接数（抬头行也计入，与复制口径一致；空白格不计）。"
+"    大文件跳过：预览渲染截断数量不全，且全表textContent烧CPU——计数显示0占位，由原生stat流式回填 */"
 "    var counts = {};"
+"    if (!BIG){"
 "    for (var r=0;r<table.rows.length;r++){"
 "      var rr = table.rows[r];"
 "      for (var c=0;c<rr.cells.length;c++){"
 "        var tv = cellText(rr.cells[c]);"
 "        if (tv.length > 0) counts[c+1] = (counts[c+1]||0) + 1;"
 "      }"
+"    }"
 "    }"
 "    /* 栏宽按表头中文4字估算（11px粗体）*/"
 "    var probe = document.createElement('span');"
@@ -134,8 +147,9 @@ static const char kInjectScriptC[] =
 "      l3.textContent = hText.length > 4 ? (hText.slice(0,4) + '…') : hText;"
 "      item.appendChild(l3);"
 "      (function(cc, hs, ds, tb){ item.addEventListener('click', function(){"
-"        /* DOM直取：从预览表格读该列全部非空值（含表头行 r=0，与统计口径一致）*/"
+"        /* DOM直取：从预览表格读该列全部非空值（含表头行 r=0，与统计口径一致）。大文件跳过：预览渲染截断DOM不全，原生走流式文件解析拿完整数据 */"
 "        var dv = [];"
+"        if (!BIG){"
 "        try{"
 "          var rows = tb.rows;"
 "          for (var r=0;r<rows.length;r++){"
@@ -146,14 +160,16 @@ static const char kInjectScriptC[] =
 "            }"
 "          }"
 "        }catch(e){}"
+"        }"
 "        post({type:'colcopy',col:cc,header:hs,df:ds,domVals:dv,tableRows:tb.rows.length});"
 "      }); })(c+1, headSig, dataSig, table);"
 "      bar.appendChild(item);"
 "    }"
 "    anchor.appendChild(bar);"
 "    document.__wxExcelColHeaderInjected = true;"
-"    /* 大文件统计修正：预览只渲染前~4096行（渲染上限），DOM计数会少——发stat请求让原生读文件统计每列真实数量后回填 */"
-"    if (table.rows.length >= 4000){"
+"    /* 大文件统计修正：预览只渲染前~4096行（渲染上限），DOM计数会少——发stat请求让原生读文件统计每列真实数量后回填；"
+"    大文件必然不全 → 无条件发stat */"
+"    if (BIG || table.rows.length >= 4000){"
 "      window.__wxUpdateCounts = function(arr){"
 "        try{"
 "          if (!arr || !arr.length) return;"
@@ -198,24 +214,24 @@ static const char kInjectScriptC[] =
     NSNumber *flag = objc_getAssociatedObject(webView, kInjectedKey);
     if (flag && flag.boolValue) return;
 
-    // 方案2（2026-10-17）：超大 sheet（解压 >8MB）不注入不轮询——微信 WPS 渲染
-    // 大表 CPU 本就高，插件注入/轮询的附加开销会把微信推到 CPU 超限被系统杀
-    // （实测 wakeups 334/s 超 150 上限、CPU 平均 68% 超 50% 上限；卸载插件不闪退证实）。
-    // 大文件改走微信原生渲染：牺牲统计栏/复制功能，换取不闪退。
-    if ([self isBigFile:webView]) {
-        NSLog(@"[WXExcelCopy] 大文件跳过注入: %@", webView.URL.absoluteString ?: @"");
-        return;
-    }
-
+    // 大文件（解压 >8MB）也注入，但脚本走轻量模式（window.__wxBigFile=true）：
+    // 不遍历全表数格/不 DOM 直取/无条件发 stat——计数由原生流式统计回填、复制走原生流式
+    // 文件解析。之前"跳过注入"会把统计栏 UI 一起跳掉（用户实测统计栏不显示），且大文件
+    // 闪退根因是脚本全表 textContent 遍历烧 CPU watchdog，不是注入本身——轻量模式
+    // 开销仅每个表一次 getBoundingClientRect + 建 UI bar，可忽略，不触发 CPU 超限。
     [self attachBridgeToWebView:webView];
 
+    BOOL big = [self isBigFile:webView];
+    NSString *scriptSrc = [NSString stringWithFormat:@"window.__wxBigFile = %@;\n%s",
+                           big ? @"true" : @"false", kInjectScriptC];
     WKUserScript *script = [[WKUserScript alloc]
-        initWithSource:[NSString stringWithUTF8String:kInjectScriptC]
+        initWithSource:scriptSrc
         injectionTime:WKUserScriptInjectionTimeAtDocumentStart
         forMainFrameOnly:NO];
     [webView.configuration.userContentController addUserScript:script];
 
     objc_setAssociatedObject(webView, kInjectedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (big) NSLog(@"[WXExcelCopy] 大文件轻量注入: %@", webView.URL.absoluteString ?: @"");
 }
 
 #pragma mark - WKScriptMessageHandler
@@ -292,12 +308,14 @@ static const char kInjectScriptC[] =
 
 + (void)ensureInjected:(WKWebView *)webView {
     if (!webView) return;
-    // 大文件不补注入（同 injectInto 口径，防 didFinish 阶段又注入空脚本/轮询）
-    if ([self isBigFile:webView]) return;
     // 补挂消息 handler：controller 粒度防重复（微信替换 controller 时新 controller 会重新挂上）
     [self attachBridgeToWebView:webView];
-    // 直接在当前 document 运行点击注入脚本（WKUserScript 只在导航前注入，此时补一次立即生效）
-    [webView evaluateJavaScript:[NSString stringWithUTF8String:kInjectScriptC] completionHandler:nil];
+    // 直接在当前 document 运行点击注入脚本（WKUserScript 只在导航前注入，此时补一次立即生效）；
+    // 大文件同样补注入并带 __wxBigFile 标志（轻量模式，不烧 CPU）
+    BOOL big = [self isBigFile:webView];
+    NSString *scriptSrc = [NSString stringWithFormat:@"window.__wxBigFile = %@;\n%s",
+                           big ? @"true" : @"false", kInjectScriptC];
+    [webView evaluateJavaScript:scriptSrc completionHandler:nil];
 }
 
 // 判断是否为超大 sheet：file URL 且 xl/worksheets/*.xml 解压体积最大值 > 8MB
