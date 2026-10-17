@@ -72,6 +72,19 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 
 - (void)buildBar {
     if (!self.webView) return;
+    // 大表渲染慢：统计栏不能抢在表格前出现、让位也要等表格 DOM 存在。
+    // webView 还在加载 → KVO 等 loading==NO 后再真正叠 bar（此时表格结构已建，让位一次命中）。
+    if (self.webView.loading) {
+        @try {
+            [self.webView addObserver:self forKeyPath:@"loading" options:NSKeyValueObservingOptionNew context:nil];
+        } @catch (NSException *e) {}
+        return;
+    }
+    [self doBuildBar];
+}
+
+- (void)doBuildBar {
+    if (!self.webView) return;
     [self.bar removeFromSuperview];
     self.bar = nil;
     self.scroll = nil;
@@ -149,14 +162,15 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     [self updateOffset];
 
     // 表格让位：一次性把预览表格向右推 70px（统计栏宽 68px），A/B 列完整露出不被遮挡。
-    // 仅执行一次样式调整，不做任何监听/处理逻辑、不挂 handler、有限重试(20×500ms=10s)后
-    // 自动结束，无常驻脚本——大文件临界状态下开销可忽略。
+    // 仅执行一次样式调整，不做任何监听/处理逻辑、不挂 handler、有限重试(30×500ms=15s)后
+    // 自动结束，无常驻脚本——大文件临界状态下开销可忽略。此时表格 DOM 通常已存在（loading==NO
+    // 后才走到这里），重试只是兜底微信二次渲染/虚拟滚动重建表格的时机。
     NSString *shift = @"(function(){"
         "var tries=0;"
         "function go(){"
         "  var t=document.querySelector('table');"
         "  if(t){t.style.marginLeft='70px';return;}"
-        "  if(++tries<20){setTimeout(go,500);}"
+        "  if(++tries<30){setTimeout(go,500);}"
         "}"
         "go();"
         "})();";
@@ -164,7 +178,17 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
-    if ([keyPath isEqualToString:@"contentOffset"]) [self updateOffset];
+    if ([keyPath isEqualToString:@"contentOffset"]) {
+        [self updateOffset];
+    } else if ([keyPath isEqualToString:@"loading"]) {
+        if (!self.webView.loading) {
+            // 加载完成：移除 loading 监听，正式叠统计栏 + 表格让位（DOM 已存在，一次命中）
+            @try {
+                [self.webView removeObserver:self forKeyPath:@"loading"];
+            } @catch (NSException *e) {}
+            [self doBuildBar];
+        }
+    }
 }
 
 - (void)updateOffset {
@@ -200,6 +224,11 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
             [self.webView.scrollView removeObserver:self forKeyPath:@"contentOffset"];
         } @catch (NSException *e) {}
         self.observing = NO;
+    }
+    if (self.webView) {
+        @try {
+            [self.webView removeObserver:self forKeyPath:@"loading"];
+        } @catch (NSException *e) {}
     }
     [self.bar removeFromSuperview];
     self.bar = nil;
