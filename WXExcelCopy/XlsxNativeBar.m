@@ -72,15 +72,40 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 
 - (void)buildBar {
     if (!self.webView) return;
-    // 大表渲染慢：统计栏不能抢在表格前出现、让位也要等表格 DOM 存在。
-    // webView 还在加载 → KVO 等 loading==NO 后再真正叠 bar（此时表格结构已建，让位一次命中）。
+    // 大表渲染慢：统计栏要贴着表格内容出现。loading==NO 只代表 HTML 框架加载完，
+    // 126MB 表格数据还在渲染（scrollView.contentSize 持续增长）——所以还要等
+    // contentSize 连续几次采样不再增长（渲染稳定）才真正叠 bar。
     if (self.webView.loading) {
         @try {
             [self.webView addObserver:self forKeyPath:@"loading" options:NSKeyValueObservingOptionNew context:nil];
         } @catch (NSException *e) {}
         return;
     }
-    [self doBuildBar];
+    [self waitForStableThenBuild];
+}
+
+// contentSize 稳定判定：每 300ms 采样一次，连续 4 次 contentSize 不再增长 → 表格渲染稳定
+// → 叠统计栏；超时 100 次（30s）强制叠（防极端情况永远等不到稳定）
+- (void)waitForStableThenBuild {
+    __block NSInteger sameCount = 0;
+    __block CGFloat lastH = 0;
+    __block NSInteger total = 0;
+    __weak typeof(self) ws = self;
+    void (^sample)(void) = nil;
+    sample = ^{
+        __strong typeof(ws) s = ws;
+        if (!s || !s.webView) return;
+        CGFloat h = s.webView.scrollView.contentSize.height;
+        if (h == lastH) { sameCount++; } else { sameCount = 1; lastH = h; }
+        total++;
+        if (sameCount >= 4 || total >= 100) {
+            [s doBuildBar];
+        } else {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), sample);
+        }
+    };
+    sample();
 }
 
 - (void)doBuildBar {
@@ -182,11 +207,11 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
         [self updateOffset];
     } else if ([keyPath isEqualToString:@"loading"]) {
         if (!self.webView.loading) {
-            // 加载完成：移除 loading 监听，正式叠统计栏 + 表格让位（DOM 已存在，一次命中）
+            // 加载完成：移除 loading 监听，等 contentSize 稳定（表格渲染完）再叠统计栏
             @try {
                 [self.webView removeObserver:self forKeyPath:@"loading"];
             } @catch (NSException *e) {}
-            [self doBuildBar];
+            [self waitForStableThenBuild];
         }
     }
 }
