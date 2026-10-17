@@ -1,4 +1,4 @@
-// Toast.m — 轻量提示（悬浮 UILabel，3.0s 自动消失；文案含复制范围，需足够阅读时间）
+// Toast.m — 轻量提示（悬浮 UILabel，1.0s 后直接消失；无淡入淡出动画）
 
 #import <UIKit/UIKit.h>
 #import "Toast.h"
@@ -33,12 +33,9 @@
         label.center = CGPointMake(keyWindow.center.x, keyWindow.bounds.size.height * 0.25);
 
         [keyWindow addSubview:label];
-        label.alpha = 0;
-        [UIView animateWithDuration:0.2 animations:^{ label.alpha = 1; }];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            [UIView animateWithDuration:0.25 animations:^{ label.alpha = 0; }
-                             completion:^(BOOL f) { [label removeFromSuperview]; }];
+            [label removeFromSuperview];
         });
     });
 }
