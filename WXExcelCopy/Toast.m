@@ -18,7 +18,7 @@
         label.text = text;
         label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
         label.textColor = [UIColor blackColor];            // 黑字：微信WPS表格预览深浅色都是白底，黑字通用
-        label.backgroundColor = [UIColor clearColor];      // 透明背景
+        label.backgroundColor = [UIColor whiteColor];      // 白底：黑字配白底最清晰
         label.textAlignment = NSTextAlignmentCenter;
         label.numberOfLines = 0;
         label.layer.cornerRadius = 10;
