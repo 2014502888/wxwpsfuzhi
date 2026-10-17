@@ -18,6 +18,8 @@
 @property (nonatomic) BOOL observing;
 @property (nonatomic, strong) NSTimer *pollTimer;
 @property (nonatomic) BOOL filled;            // 统计栏内容是否已填充
+@property (nonatomic) BOOL collapsed;         // 统计栏是否折叠（主体滑出屏幕左缘）
+@property (nonatomic, strong) UIButton *toggleBtn;  // 折叠把手（留在屏幕左缘）
 @end
 
 @implementation XlsxNativeBar
@@ -75,15 +77,13 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 - (void)buildBar {
     if (!self.webView) return;
     // 文件解析完（数据就绪）直接创建并显示统计栏——不再等表格渲染完成。
-    // 让位用 CSS 声明式（shiftTable 注入 table{margin-left:70px!important}）：
-    // 表格无论何时创建/重载都自动带偏移——prepareBar 后立即注入一次（早期生效），
-    // pollTick 在 loading==NO 后再补注一次确保（防重载冲掉）+ 此时填充统计栏内容
-    // （页面稳定、表格数据渲染时，内容与表格数据同时出现）。
+    // 表格不让位（CSS 让位实测无效已移除）：统计栏默认展开，需要看表格时可点把手折叠，
+    // 收起时主体滑出屏幕左缘、把手留在屏幕内，表格完整露出无遮挡。
+    // 统计栏内容在 loading==NO（页面稳定、表格数据渲染时）填充，两者同时出现。
     // 绝不能用 KVO 监听 webView.loading（预览页中途被微信释放 → observer 未移除 → 崩）；
     // 也绝不能用递归 block + dispatch_after（自引用 block 复制有 use-after-free 风险，
     // 实测 _dispatch_Block_copy EXC_BREAKPOINT 崩）。NSTimer+selector 完全避开这两类问题。
     [self prepareBar];
-    [self shiftTable];
     [self startPolling];
 }
 
@@ -110,10 +110,24 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 
     self.scroll = scroll;
     self.bar = bar;
-    // 壳先就位：只显示统计栏区域（内容由 fillContent 在表格 DOM 出现时填充，
-    // 与表格数据渲染基本同时出现——避免壳+内容+表格+让位四个视觉差）
+    // 壳先就位：只显示统计栏区域（内容由 fillContent 在页面稳定时填充，
+    // 与表格数据渲染同时出现——避免壳+内容+表格+让位四个视觉差）
     [self.webView addSubview:bar];
     [self.webView bringSubviewToFront:bar];
+
+    // 折叠把手：放统计栏最右 20px（x=48..68）。展开时把手贴在统计栏右缘；
+    // 折叠时统计栏整体左移 48px——主体滑出屏幕，把手落在屏幕左缘 x=0..20 留在屏内，
+    // 点击可再展开。箭头方向随状态切换（«=可收，»=可展）。
+    UIButton *tg = [UIButton buttonWithType:UIButtonTypeCustom];
+    tg.frame = CGRectMake(barW - 20, 0, 20, 56);
+    tg.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    [tg setTitle:@"«" forState:UIControlStateNormal];
+    [tg setTitleColor:[UIColor colorWithWhite:0.13 alpha:1] forState:UIControlStateNormal];
+    tg.backgroundColor = UIColor.clearColor;
+    [tg addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventTouchUpInside];
+    [bar addSubview:tg];
+    self.toggleBtn = tg;
+    self.collapsed = NO;
 
     // 跟随表格纵向滚动（KVO webView 内部 scrollView 的 contentOffset）
     UIScrollView *sv = self.webView.scrollView;
@@ -177,25 +191,7 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     }
 }
 
-// 表格让位（CSS 声明式）：注入一条样式规则 table{margin-left:70px !important}——
-// 预览页里任何 table 元素（不管何时创建、重载几次）都自动带 70px 偏移，A/B 列完整露出。
-// 声明式让位与时机无关：表格从渲染起就默认让位，不需要找 DOM、不需要重试、不会跳动。
-// 幂等：带 data-xlsxbar 标记，重复注入不重复添加；早期注入若被页面重载冲掉，
-// pollTick 在 loading==NO 后再补注一次确保最终生效。仅一次样式声明，无常驻脚本。
-- (void)shiftTable {
-    if (!self.webView) return;
-    NSString *js = @"(function(){"
-        "if(document.querySelector('style[data-xlsxbar]')){return true;}"
-        "var s=document.createElement('style');"
-        "s.setAttribute('data-xlsxbar','1');"
-        "s.textContent='table{margin-left:70px !important}';"
-        "(document.head||document.documentElement).appendChild(s);"
-        "return true;"
-        "})();";
-    [self.webView evaluateJavaScript:js completionHandler:nil];
-}
-
-// 启动轮询 timer（0.3s 一次）——只负责等 loading==NO 后让位
+// 启动轮询 timer（0.3s 一次）——只负责等 loading==NO 后填充统计栏内容
 - (void)startPolling {
     [self stopPolling];
     self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:0.3
@@ -207,11 +203,9 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 
 - (void)pollTick {
     if (!self.webView) { [self stopPolling]; return; }
-    // 页面完全加载（loading==NO）后：
-    // ① 补注让位样式（早期注入若被页面重载冲掉，这里确保最终生效，幂等重复无害）
-    // ② 填充统计栏内容——页面稳定、表格数据渲染时填充，两者同时出现
+    // 页面完全加载（loading==NO）后填充统计栏内容——页面稳定、表格数据渲染时，
+    // 统计栏内容与表格数据同时出现
     if (!self.webView.loading) {
-        [self shiftTable];
         [self fillContent];
         [self stopPolling];
     }
@@ -228,10 +222,23 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     }
 }
 
+// 滚动跟随 + 折叠合并到同一个 transform：
+// 纵向跟随表格滚动（translateY=-contentOffset.y），横向按折叠状态平移
+// （折叠=左移 48px：主体滑出屏幕、把手落在左缘；展开=x=0）。
 - (void)updateOffset {
     if (!self.webView || !self.bar) return;
     CGFloat y = -self.webView.scrollView.contentOffset.y;
-    self.bar.transform = CGAffineTransformMakeTranslation(0, y);
+    CGFloat x = self.collapsed ? -(self.bar.bounds.size.width - 20) : 0;
+    self.bar.transform = CGAffineTransformMakeTranslation(x, y);
+}
+
+// 折叠/展开切换：翻转变换 + 0.2s 动画，把手箭头方向随状态切换（«=可收，»=可展）
+- (void)toggle:(UIButton *)btn {
+    self.collapsed = !self.collapsed;
+    [UIView animateWithDuration:0.2 animations:^{
+        [self updateOffset];
+    }];
+    [btn setTitle:(self.collapsed ? @"»" : @"«") forState:UIControlStateNormal];
 }
 
 // 点击列条目 → 原生流式提取该列 → 剪贴板（columnLinesAtPath 内存单列，大文件安全）
