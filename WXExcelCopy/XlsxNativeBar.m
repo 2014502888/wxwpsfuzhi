@@ -17,7 +17,6 @@
 @property (nonatomic, strong) NSArray<NSString *> *headers;
 @property (nonatomic) BOOL observing;
 @property (nonatomic, strong) NSTimer *pollTimer;
-@property (nonatomic) BOOL shifted;           // 表格让位是否已执行
 @property (nonatomic) BOOL filled;            // 统计栏内容是否已填充
 @end
 
@@ -76,12 +75,15 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 - (void)buildBar {
     if (!self.webView) return;
     // 文件解析完（数据就绪）直接创建并显示统计栏——不再等表格渲染完成。
-    // 统计栏与让位页面基本同时出现：数据来自后台流式解析（onLoad 即开始，秒级完成），
-    // 让位由 pollTick 在 loading==NO 时提前执行（表格从渲染起就带 70px 偏移）。
+    // 让位用 CSS 声明式（shiftTable 注入 table{margin-left:70px!important}）：
+    // 表格无论何时创建/重载都自动带偏移——prepareBar 后立即注入一次（早期生效），
+    // pollTick 在 loading==NO 后再补注一次确保（防重载冲掉）+ 此时填充统计栏内容
+    // （页面稳定、表格数据渲染时，内容与表格数据同时出现）。
     // 绝不能用 KVO 监听 webView.loading（预览页中途被微信释放 → observer 未移除 → 崩）；
     // 也绝不能用递归 block + dispatch_after（自引用 block 复制有 use-after-free 风险，
     // 实测 _dispatch_Block_copy EXC_BREAKPOINT 崩）。NSTimer+selector 完全避开这两类问题。
     [self prepareBar];
+    [self shiftTable];
     [self startPolling];
 }
 
@@ -122,8 +124,8 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     [self updateOffset];
 }
 
-// 填充统计栏内容（列字母/数量/表头）——在表格 DOM 出现（让位脚本命中 table）时调用，
-// 与表格数据渲染基本同时出现
+// 填充统计栏内容（列字母/数量/表头）——在页面完全加载（loading==NO）、
+// 表格数据开始渲染时调用，统计栏内容与表格数据同时出现
 - (void)fillContent {
     if (!self.webView || !self.scroll || self.filled) return;
     self.filled = YES;
@@ -175,33 +177,22 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     }
 }
 
-// 表格让位：一次性把预览表格向右推 70px（统计栏宽 68px），A/B 列完整露出不被遮挡。
-// 仅执行一次样式调整，不做任何监听/处理逻辑、不挂 handler、有限重试(50×100ms=5s)后
-// 自动结束，无常驻脚本——大文件临界状态下开销可忽略。提前到 loading==NO 后执行，
-// 重试 100ms 快速命中表格 DOM——表格内容可见前就位，消除"内容出来后才被推"的跳动。
-// JS 返回 table 是否命中 → 原生据此填充统计栏内容（与表格数据渲染基本同时出现）。
+// 表格让位（CSS 声明式）：注入一条样式规则 table{margin-left:70px !important}——
+// 预览页里任何 table 元素（不管何时创建、重载几次）都自动带 70px 偏移，A/B 列完整露出。
+// 声明式让位与时机无关：表格从渲染起就默认让位，不需要找 DOM、不需要重试、不会跳动。
+// 幂等：带 data-xlsxbar 标记，重复注入不重复添加；早期注入若被页面重载冲掉，
+// pollTick 在 loading==NO 后再补注一次确保最终生效。仅一次样式声明，无常驻脚本。
 - (void)shiftTable {
-    if (!self.webView || self.shifted) return;
-    self.shifted = YES;
-    __weak typeof(self) ws = self;
-    NSString *shift = @"(function(){"
-        "var tries=0;"
-        "function go(){"
-        "  var t=document.querySelector('table');"
-        "  if(t){t.style.marginLeft='70px';return true;}"
-        "  if(++tries<50){setTimeout(go,100);return null;}"
-        "  return false;"
-        "}"
-        "return go();"
+    if (!self.webView) return;
+    NSString *js = @"(function(){"
+        "if(document.querySelector('style[data-xlsxbar]')){return true;}"
+        "var s=document.createElement('style');"
+        "s.setAttribute('data-xlsxbar','1');"
+        "s.textContent='table{margin-left:70px !important}';"
+        "(document.head||document.documentElement).appendChild(s);"
+        "return true;"
         "})();";
-    [self.webView evaluateJavaScript:shift completionHandler:^(id result, NSError *error) {
-        __strong typeof(ws) s = ws;
-        if (!s) return;
-        // 无论表格 DOM 是否命中都填充统计栏内容（命中=与表格数据同时；超时=5s兜底照填）
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [s fillContent];
-        });
-    }];
+    [self.webView evaluateJavaScript:js completionHandler:nil];
 }
 
 // 启动轮询 timer（0.3s 一次）——只负责等 loading==NO 后让位
@@ -216,9 +207,12 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 
 - (void)pollTick {
     if (!self.webView) { [self stopPolling]; return; }
-    // 页面已可执行 JS：提前让位（表格从渲染起就带 marginLeft=70px，显示统计栏时无位移感）
+    // 页面完全加载（loading==NO）后：
+    // ① 补注让位样式（早期注入若被页面重载冲掉，这里确保最终生效，幂等重复无害）
+    // ② 填充统计栏内容——页面稳定、表格数据渲染时填充，两者同时出现
     if (!self.webView.loading) {
         [self shiftTable];
+        [self fillContent];
         [self stopPolling];
     }
 }
