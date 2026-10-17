@@ -18,6 +18,7 @@
 @property (nonatomic) BOOL observing;
 @property (nonatomic, strong) NSTimer *pollTimer;
 @property (nonatomic) BOOL shifted;           // 表格让位是否已执行
+@property (nonatomic) BOOL filled;            // 统计栏内容是否已填充
 @end
 
 @implementation XlsxNativeBar
@@ -105,6 +106,29 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     scroll.showsVerticalScrollIndicator = NO;
     [bar addSubview:scroll];
 
+    self.scroll = scroll;
+    self.bar = bar;
+    // 壳先就位：只显示统计栏区域（内容由 fillContent 在表格 DOM 出现时填充，
+    // 与表格数据渲染基本同时出现——避免壳+内容+表格+让位四个视觉差）
+    [self.webView addSubview:bar];
+    [self.webView bringSubviewToFront:bar];
+
+    // 跟随表格纵向滚动（KVO webView 内部 scrollView 的 contentOffset）
+    UIScrollView *sv = self.webView.scrollView;
+    if (sv && !self.observing) {
+        [sv addObserver:self forKeyPath:@"contentOffset" options:NSKeyValueObservingOptionNew context:nil];
+        self.observing = YES;
+    }
+    [self updateOffset];
+}
+
+// 填充统计栏内容（列字母/数量/表头）——在表格 DOM 出现（让位脚本命中 table）时调用，
+// 与表格数据渲染基本同时出现
+- (void)fillContent {
+    if (!self.webView || !self.scroll || self.filled) return;
+    self.filled = YES;
+    UIScrollView *scroll = self.scroll;
+    CGFloat barW = scroll.bounds.size.width;
     NSInteger n = (NSInteger)self.counts.count;
     CGFloat itemH = 46;
     scroll.contentSize = CGSizeMake(barW, MAX(itemH * (CGFloat)n, scroll.bounds.size.height));
@@ -149,38 +173,35 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 
         [scroll addSubview:btn];
     }
-
-    self.scroll = scroll;
-    self.bar = bar;
-    [self.webView addSubview:bar];
-    [self.webView bringSubviewToFront:bar];
-
-    // 跟随表格纵向滚动（KVO webView 内部 scrollView 的 contentOffset）
-    UIScrollView *sv = self.webView.scrollView;
-    if (sv && !self.observing) {
-        [sv addObserver:self forKeyPath:@"contentOffset" options:NSKeyValueObservingOptionNew context:nil];
-        self.observing = YES;
-    }
-    [self updateOffset];
 }
 
 // 表格让位：一次性把预览表格向右推 70px（统计栏宽 68px），A/B 列完整露出不被遮挡。
-// 仅执行一次样式调整，不做任何监听/处理逻辑、不挂 handler、有限重试(30×500ms=15s)后
+// 仅执行一次样式调整，不做任何监听/处理逻辑、不挂 handler、有限重试(50×100ms=5s)后
 // 自动结束，无常驻脚本——大文件临界状态下开销可忽略。提前到 loading==NO 后执行，
-// 让表格从渲染起就带 marginLeft=70px，显示统计栏时排版已是让位后的。
+// 重试 100ms 快速命中表格 DOM——表格内容可见前就位，消除"内容出来后才被推"的跳动。
+// JS 返回 table 是否命中 → 原生据此填充统计栏内容（与表格数据渲染基本同时出现）。
 - (void)shiftTable {
     if (!self.webView || self.shifted) return;
     self.shifted = YES;
+    __weak typeof(self) ws = self;
     NSString *shift = @"(function(){"
         "var tries=0;"
         "function go(){"
         "  var t=document.querySelector('table');"
-        "  if(t){t.style.marginLeft='70px';return;}"
-        "  if(++tries<30){setTimeout(go,500);}"
+        "  if(t){t.style.marginLeft='70px';return true;}"
+        "  if(++tries<50){setTimeout(go,100);return null;}"
+        "  return false;"
         "}"
-        "go();"
+        "return go();"
         "})();";
-    [self.webView evaluateJavaScript:shift completionHandler:nil];
+    [self.webView evaluateJavaScript:shift completionHandler:^(id result, NSError *error) {
+        __strong typeof(ws) s = ws;
+        if (!s) return;
+        // 无论表格 DOM 是否命中都填充统计栏内容（命中=与表格数据同时；超时=5s兜底照填）
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [s fillContent];
+        });
+    }];
 }
 
 // 启动轮询 timer（0.3s 一次）——只负责等 loading==NO 后让位
