@@ -393,7 +393,7 @@ static const char kInjectScriptC[] =
             }
             if (clean.count >= 2) {
                 [UIPasteboard generalPasteboard].string = [clean componentsJoinedByString:@"\n"];
-                [Toast show:[NSString stringWithFormat:@"复制%@列%lu条含表头",
+                [Toast show:[NSString stringWithFormat:@"复制%@列%lu条含表头（直取）",
                              [XLSXParser columnLetter:col], (unsigned long)clean.count]];
                 return;
             }
@@ -470,7 +470,7 @@ static const char kInjectScriptC[] =
             NSString *joined = [lines componentsJoinedByString:@"\n"];
             [UIPasteboard generalPasteboard].string = joined;
             NSString *letter = [XLSXParser columnLetter:col];
-            [Toast show:[NSString stringWithFormat:@"复制%@列%lu条含表头", letter, (unsigned long)lines.count]];
+            [Toast show:[NSString stringWithFormat:@"复制%@列%lu条含表头（解析）", letter, (unsigned long)lines.count]];
         });
     });
 }
