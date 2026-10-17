@@ -96,7 +96,7 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     CGFloat barW = 68;
     CGRect f = CGRectMake(0, 0, barW, MAX(100, self.webView.bounds.size.height));
     UIView *bar = [[UIView alloc] initWithFrame:f];
-    bar.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.97];
+    bar.backgroundColor = [UIColor whiteColor];   // 纯白 100、不透明 100
     bar.layer.shadowColor = UIColor.blackColor.CGColor;
     bar.layer.shadowOpacity = 0.25;
     bar.layer.shadowOffset = CGSizeMake(1, 0);
@@ -141,7 +141,10 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
         btn.frame = CGRectMake(0, y, barW, itemH);
         btn.backgroundColor = UIColor.clearColor;
         btn.tag = col;
-        [btn addTarget:self action:@selector(tap:) forControlEvents:UIControlEventTouchUpInside];
+        // 双击复制（防误触：单击不复制）
+        UITapGestureRecognizer *dtap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tap:)];
+        dtap.numberOfTapsRequired = 2;
+        [btn addGestureRecognizer:dtap];
 
         UILabel *l1 = [[UILabel alloc] initWithFrame:CGRectMake(2, 2, barW - 4, 15)];
         l1.text = [XLSXParser columnLetter:col];
@@ -243,7 +246,7 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     }];
 }
 
-// 点击列条目 → 原生流式提取该列 → 剪贴板（columnLinesAtPath 内存单列，大文件安全）
+// 双击列条目 → 原生流式提取该列 → 剪贴板（columnLinesAtPath 内存单列，大文件安全）
 - (void)tap:(UIButton *)btn {
     NSInteger col = btn.tag;
     NSString *path = self.filePath;
