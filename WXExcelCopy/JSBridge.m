@@ -393,7 +393,8 @@ static const char kInjectScriptC[] =
             }
             if (clean.count >= 2) {
                 [UIPasteboard generalPasteboard].string = [clean componentsJoinedByString:@"\n"];
-                [Toast show:[NSString stringWithFormat:@"✓ 预览复制 %lu 条(含表头)", (unsigned long)clean.count]];
+                [Toast show:[NSString stringWithFormat:@"复制%@列%lu条含表头",
+                             [XLSXParser columnLetter:col], (unsigned long)clean.count]];
                 return;
             }
         }
@@ -411,7 +412,6 @@ static const char kInjectScriptC[] =
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSArray<NSString *> *ordered = [self orderedCandidates:body[@"url"] ?: @""];
         NSArray<NSString *> *lines = nil;
-        NSInteger usedFile = -1, usedSheet = 1;
         // 第零遍：缓存命中（数据指纹→文件路径+sheet，命中直接解析这一个文件，不搜库；文件被删自动失效）
         NSDictionary *cached = [self cachedMatchForFingerprint:fp];
         if (cached) {
@@ -420,8 +420,7 @@ static const char kInjectScriptC[] =
             NSError *e = nil;
             NSArray *l = [XLSXParser columnLinesAtPath:path column:col fromRow:1 sheetIndex:sidx error:&e];
             if (l && !e) {
-                NSInteger idx = (NSInteger)[ordered indexOfObject:path];
-                lines = l; usedFile = (idx == NSNotFound ? -1 : idx); usedSheet = sidx;
+                lines = l;
             }
         }
         // 第一遍：表头+A列前3行数据 都匹配 → 精确命中预览对应文件（同表头不同数据的文件跳过）。
@@ -433,7 +432,7 @@ static const char kInjectScriptC[] =
                     NSError *e = nil;
                     NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:sidx error:&e];
                     if (l && !e) {
-                        lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = sidx;
+                        lines = l;
                         [self cacheMatchFingerprint:fp path:p sheet:sidx];
                         break;
                     }
@@ -447,7 +446,7 @@ static const char kInjectScriptC[] =
                 if (sidx > 0) {
                     NSError *e = nil;
                     NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:sidx error:&e];
-                    if (l && !e) { lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = sidx; break; }
+                    if (l && !e) { lines = l; break; }
                 }
             }
         }
@@ -456,7 +455,7 @@ static const char kInjectScriptC[] =
             for (NSString *p in ordered) {
                 NSError *e = nil;
                 NSArray *l = [XLSXParser columnLinesAtPath:p column:col fromRow:1 sheetIndex:1 error:&e];
-                if (l && !e) { lines = l; usedFile = (NSInteger)[ordered indexOfObject:p]; usedSheet = 1; break; }
+                if (l && !e) { lines = l; break; }
             }
         }
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -471,13 +470,7 @@ static const char kInjectScriptC[] =
             NSString *joined = [lines componentsJoinedByString:@"\n"];
             [UIPasteboard generalPasteboard].string = joined;
             NSString *letter = [XLSXParser columnLetter:col];
-            if (usedFile >= 0 && usedFile < (NSInteger)ordered.count) {
-                [Toast show:[NSString stringWithFormat:@"✓ %@ sheet%ld 复制%@列共%lu条(含表头)",
-                             ordered[(NSUInteger)usedFile].lastPathComponent, (long)usedSheet,
-                             letter, (unsigned long)lines.count]];
-            } else {
-                [Toast show:[NSString stringWithFormat:@"✓ 复制%@列共%lu条(含表头)", letter, (unsigned long)lines.count]];
-            }
+            [Toast show:[NSString stringWithFormat:@"复制%@列%lu条含表头", letter, (unsigned long)lines.count]];
         });
     });
 }

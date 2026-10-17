@@ -263,8 +263,7 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
             if (!lines) { [Toast show:@"复制失败：解析异常"]; return; }
             if (lines.count == 0) { [Toast show:@"复制失败：该列无数据"]; return; }
             [UIPasteboard generalPasteboard].string = [lines componentsJoinedByString:@"\n"];
-            [Toast show:[NSString stringWithFormat:@"✓ %@ sheet%ld 复制%@列共%lu条(含表头)",
-                         path.lastPathComponent, (long)sidx,
+            [Toast show:[NSString stringWithFormat:@"复制%@列%lu条含表头",
                          [XLSXParser columnLetter:col], (unsigned long)lines.count]];
         });
     });
