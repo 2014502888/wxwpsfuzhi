@@ -247,8 +247,12 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 }
 
 // 双击列条目 → 原生流式提取该列 → 剪贴板（columnLinesAtPath 内存单列，大文件安全）
-- (void)tap:(UIButton *)btn {
-    NSInteger col = btn.tag;
+// 注意：UITapGestureRecognizer 的回调 sender 是手势对象（不是按钮），必须从
+// gesture.view 取按钮再拿 tag——直接当按钮用会 unrecognized selector 闪退。
+- (void)tap:(UITapGestureRecognizer *)gesture {
+    UIView *v = gesture.view;
+    if (![v isKindOfClass:[UIButton class]]) return;
+    NSInteger col = ((UIButton *)v).tag;
     NSString *path = self.filePath;
     NSInteger sidx = self.sheetIndex;
     if (!path) { [Toast show:@"复制失败：文件不可用"]; return; }
