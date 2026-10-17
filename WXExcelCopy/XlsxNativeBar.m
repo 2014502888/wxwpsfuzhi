@@ -76,49 +76,19 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 
 - (void)buildBar {
     if (!self.webView) return;
-    // 大表渲染慢：统计栏要贴着表格内容出现。loading==NO 只代表 HTML 框架加载完，
-    // 126MB 表格数据还在渲染（scrollView.contentSize 持续增长）——统一用一个 NSTimer
-    // 轮询：等 loading 完成 且 contentSize 连续 4 次采样不再增长（渲染稳定）才叠 bar。
+    // 大表渲染慢：统计栏要贴着表格内容出现。分两步——
+    // ① prepareBar：文件解析完就预创建统计栏 UI（hidden），显示零延迟准备；
+    // ② startPolling 轮询 contentSize：等 loading 完成且连续 4 次采样不再增长（渲染稳定）
+    //    才 showBar 显示（hidden=NO）——稳定瞬间直接显示，不再有创建 UI 的延迟。
     // 绝不能用 KVO 监听 webView.loading（预览页中途被微信释放 → observer 未移除 → 崩）；
     // 也绝不能用递归 block + dispatch_after（自引用 block 复制有 use-after-free 风险，
     // 实测 _dispatch_Block_copy EXC_BREAKPOINT 崩）。NSTimer+selector 完全避开这两类问题。
+    [self prepareBar];
     [self startPolling];
 }
 
-// 启动轮询 timer（0.3s 一次）
-- (void)startPolling {
-    [self stopPolling];
-    self.stableSame = 0;
-    self.lastHeight = 0;
-    self.stableTotal = 0;
-    self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:0.3
-                                                      target:self
-                                                    selector:@selector(pollTick)
-                                                    userInfo:nil
-                                                     repeats:YES];
-}
-
-- (void)pollTick {
-    if (!self.webView) { [self stopPolling]; return; }
-    // 还在加载：不采样（contentSize 可能为 0，避免误判稳定），等下一次
-    if (self.webView.loading) { return; }
-    CGFloat h = self.webView.scrollView.contentSize.height;
-    if (h == self.lastHeight) { self.stableSame++; }
-    else { self.stableSame = 1; self.lastHeight = h; }
-    self.stableTotal++;
-    // 连续 4 次（约 1.2s）contentSize 不再增长 = 渲染稳定；或 100 次（30s）超时强制叠
-    if (self.stableSame >= 4 || self.stableTotal >= 100) {
-        [self stopPolling];
-        [self doBuildBar];
-    }
-}
-
-- (void)stopPolling {
-    [self.pollTimer invalidate];
-    self.pollTimer = nil;
-}
-
-- (void)doBuildBar {
+// 预创建统计栏 UI（hidden）并挂滚动跟随；稳定判定通过后 showBar 直接显示
+- (void)prepareBar {
     if (!self.webView) return;
     [self.bar removeFromSuperview];
     self.bar = nil;
@@ -185,6 +155,7 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 
     self.scroll = scroll;
     self.bar = bar;
+    bar.hidden = YES;   // 预创建：先隐藏，稳定判定通过瞬间显示（零延迟）
     [self.webView addSubview:bar];
     [self.webView bringSubviewToFront:bar];
 
@@ -195,11 +166,17 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
         self.observing = YES;
     }
     [self updateOffset];
+}
+
+// 稳定判定通过：直接显示统计栏（UI 已预创建，hidden=NO 零延迟）+ 表格让位
+- (void)showBar {
+    if (!self.webView || !self.bar) return;
+    self.bar.hidden = NO;
 
     // 表格让位：一次性把预览表格向右推 70px（统计栏宽 68px），A/B 列完整露出不被遮挡。
     // 仅执行一次样式调整，不做任何监听/处理逻辑、不挂 handler、有限重试(30×500ms=15s)后
-    // 自动结束，无常驻脚本——大文件临界状态下开销可忽略。此时表格 DOM 通常已存在（loading==NO
-    // 后才走到这里），重试只是兜底微信二次渲染/虚拟滚动重建表格的时机。
+    // 自动结束，无常驻脚本——大文件临界状态下开销可忽略。此时表格已渲染稳定（contentSize
+    // 判定通过），DOM 必然存在，重试只是兜底微信二次渲染/虚拟滚动重建表格的时机。
     NSString *shift = @"(function(){"
         "var tries=0;"
         "function go(){"
@@ -210,6 +187,39 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
         "go();"
         "})();";
     [self.webView evaluateJavaScript:shift completionHandler:nil];
+}
+
+// 启动轮询 timer（0.3s 一次）
+- (void)startPolling {
+    [self stopPolling];
+    self.stableSame = 0;
+    self.lastHeight = 0;
+    self.stableTotal = 0;
+    self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:0.3
+                                                      target:self
+                                                    selector:@selector(pollTick)
+                                                    userInfo:nil
+                                                     repeats:YES];
+}
+
+- (void)pollTick {
+    if (!self.webView) { [self stopPolling]; return; }
+    // 还在加载：不采样（contentSize 可能为 0，避免误判稳定），等下一次
+    if (self.webView.loading) { return; }
+    CGFloat h = self.webView.scrollView.contentSize.height;
+    if (h == self.lastHeight) { self.stableSame++; }
+    else { self.stableSame = 1; self.lastHeight = h; }
+    self.stableTotal++;
+    // 连续 4 次（约 1.2s）contentSize 不再增长 = 渲染稳定；或 100 次（30s）超时强制显示
+    if (self.stableSame >= 4 || self.stableTotal >= 100) {
+        [self stopPolling];
+        [self showBar];
+    }
+}
+
+- (void)stopPolling {
+    [self.pollTimer invalidate];
+    self.pollTimer = nil;
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
