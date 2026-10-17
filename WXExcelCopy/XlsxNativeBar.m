@@ -147,6 +147,20 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
         self.observing = YES;
     }
     [self updateOffset];
+
+    // 表格让位：一次性把预览表格向右推 70px（统计栏宽 68px），A/B 列完整露出不被遮挡。
+    // 仅执行一次样式调整，不做任何监听/处理逻辑、不挂 handler、有限重试(20×500ms=10s)后
+    // 自动结束，无常驻脚本——大文件临界状态下开销可忽略。
+    NSString *shift = @"(function(){"
+        "var tries=0;"
+        "function go(){"
+        "  var t=document.querySelector('table');"
+        "  if(t){t.style.marginLeft='70px';return;}"
+        "  if(++tries<20){setTimeout(go,500);}"
+        "}"
+        "go();"
+        "})();";
+    [self.webView evaluateJavaScript:shift completionHandler:nil];
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
