@@ -311,9 +311,14 @@ static NSInteger RowNumberFromRef(NSString *ref) {
             return;
         }
         // 单列模式：只收目标列非空值（行号→值），顺带收第一行表头；内存 = 单列，不构造整表
+        // 注意：表头行(第1行)必须同时写入 colRows[1]——否则输出从第2行起、第1行是空串，
+        // "含表头"复制会丢表头（大文件/小文件解析兜底路径都走这里，2026-10-18 检查发现）
         if (self.targetCol > 0) {
             if (rowNum == 1) {
                 self.firstRow[@(colNum)] = value;
+                if (colNum == self.targetCol) {
+                    self.colRows[@(1)] = value;
+                }
             } else if (colNum == self.targetCol) {
                 self.colRows[@(rowNum)] = value;
             }
