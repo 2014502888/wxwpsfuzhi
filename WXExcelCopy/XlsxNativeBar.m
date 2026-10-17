@@ -75,13 +75,32 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
     // 大表渲染慢：统计栏要贴着表格内容出现。loading==NO 只代表 HTML 框架加载完，
     // 126MB 表格数据还在渲染（scrollView.contentSize 持续增长）——所以还要等
     // contentSize 连续几次采样不再增长（渲染稳定）才真正叠 bar。
+    // 注意：绝不能用 KVO 监听 webView.loading——预览页可能在加载中途被微信释放，
+    // webView dealloc 时还有注册的 observer 会直接崩（KVO dealloc 检查）；轮询
+    // weak 引用，webView 释放后 block 自动退出，零崩溃风险。
     if (self.webView.loading) {
-        @try {
-            [self.webView addObserver:self forKeyPath:@"loading" options:NSKeyValueObservingOptionNew context:nil];
-        } @catch (NSException *e) {}
+        [self pollLoadingThenBuild];
         return;
     }
     [self waitForStableThenBuild];
+}
+
+// 轮询 loading 直到加载完成（或 30s 超时），再走 contentSize 稳定判定
+- (void)pollLoadingThenBuild {
+    __weak typeof(self) ws = self;
+    __block NSInteger total = 0;
+    void (^poll)(void) = nil;
+    poll = ^{
+        __strong typeof(ws) s = ws;
+        if (!s || !s.webView) return;
+        if (!s.webView.loading || ++total >= 100) {
+            [s waitForStableThenBuild];
+        } else {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), poll);
+        }
+    };
+    poll();
 }
 
 // contentSize 稳定判定：每 300ms 采样一次，连续 4 次 contentSize 不再增长 → 表格渲染稳定
@@ -205,14 +224,6 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
     if ([keyPath isEqualToString:@"contentOffset"]) {
         [self updateOffset];
-    } else if ([keyPath isEqualToString:@"loading"]) {
-        if (!self.webView.loading) {
-            // 加载完成：移除 loading 监听，等 contentSize 稳定（表格渲染完）再叠统计栏
-            @try {
-                [self.webView removeObserver:self forKeyPath:@"loading"];
-            } @catch (NSException *e) {}
-            [self waitForStableThenBuild];
-        }
     }
 }
 
@@ -249,11 +260,6 @@ static const char *kNativeBarKey = "wxExcelNativeBarKey";
             [self.webView.scrollView removeObserver:self forKeyPath:@"contentOffset"];
         } @catch (NSException *e) {}
         self.observing = NO;
-    }
-    if (self.webView) {
-        @try {
-            [self.webView removeObserver:self forKeyPath:@"loading"];
-        } @catch (NSException *e) {}
     }
     [self.bar removeFromSuperview];
     self.bar = nil;
